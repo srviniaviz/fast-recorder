@@ -132,13 +132,18 @@ NvencProbeResult probeNvenc() {
         }
     }
 
-    functions.nvEncCloseEncodeSession(session);
+    functions.nvEncDestroyEncoder(session);
 
     result.description = result.h264Supported
         ? L"NVENC disponível para H.264."
         : L"NVENC encontrado, mas H.264 não foi anunciado pela API.";
 #else
-    HMODULE library = LoadLibraryW(L"nvEncodeAPI.dll");
+    HMODULE library = nullptr;
+#if defined(_WIN64)
+    library = LoadLibraryW(L"nvEncodeAPI64.dll");
+#else
+    library = LoadLibraryW(L"nvEncodeAPI.dll");
+#endif
     result.runtimeLibraryFound = library != nullptr;
     if (library != nullptr) {
         FreeLibrary(library);

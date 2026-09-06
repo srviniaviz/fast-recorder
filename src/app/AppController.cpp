@@ -628,7 +628,7 @@ std::wstring AppController::selectedEngineStatus() const {
     switch (m_recorder.engine()) {
     case recording::EncoderEngine::Nvenc:
         return m_nvencProbe.description +
-            L" A gravação atual usa a seleção de hardware do Media Foundation.";
+            L" A gravação atual usa o backend direto NVENC.";
     case recording::EncoderEngine::Amf:
         return m_amfProbe.description +
             L" A gravação atual usa a seleção de hardware do Media Foundation.";

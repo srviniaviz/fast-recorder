@@ -40,6 +40,7 @@ add_executable(fast-record WIN32
     src/recording/AmfProbe.cpp
     src/recording/MediaFoundationBackend.cpp
     src/recording/GraphicsCapture.cpp
+    src/recording/NvencBackend.cpp
     src/recording/NvencProbe.cpp
     src/recording/RecorderController.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc
@@ -97,6 +98,10 @@ target_link_libraries(capture-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwri
 # NVENC is intentionally loaded at runtime. The SDK headers are only needed
 # when compiling the optional capability probe and encoder backend.
 set(FASTRECORD_NVENC_SDK_DIR "" CACHE PATH "NVIDIA Video Codec SDK directory")
+option(FASTRECORD_FETCH_ENCODER_HEADERS
+    "Fetch pinned NVENC headers when the local SDK is not installed"
+    ON
+)
 find_path(FASTRECORD_NVENC_INCLUDE_DIR
     NAMES nvEncodeAPI.h
     HINTS
@@ -105,12 +110,61 @@ find_path(FASTRECORD_NVENC_INCLUDE_DIR
     PATH_SUFFIXES Interface include Include
 )
 
+if(NOT FASTRECORD_NVENC_INCLUDE_DIR AND FASTRECORD_FETCH_ENCODER_HEADERS)
+    # The header-only package is used only at build time. The driver API is
+    # still loaded dynamically, so the released app does not ship NVIDIA DLLs.
+    FetchContent_Declare(
+        nvcodec_headers
+        GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+        GIT_TAG 0a6fba9a2820628b8103464f4c8753ee05838baa
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_Populate(nvcodec_headers)
+    set(FASTRECORD_NVENC_INCLUDE_DIR
+        "${nvcodec_headers_SOURCE_DIR}/include/ffnvcodec"
+        CACHE PATH "NVIDIA Video Codec SDK include directory"
+        FORCE
+    )
+endif()
+
+# Older configurations may have cached the repository root instead of the
+# directory that directly contains nvEncodeAPI.h.
+if(FASTRECORD_NVENC_INCLUDE_DIR AND
+   NOT EXISTS "${FASTRECORD_NVENC_INCLUDE_DIR}/nvEncodeAPI.h" AND
+   EXISTS "${FASTRECORD_NVENC_INCLUDE_DIR}/ffnvcodec/nvEncodeAPI.h")
+    set(FASTRECORD_NVENC_INCLUDE_DIR
+        "${FASTRECORD_NVENC_INCLUDE_DIR}/ffnvcodec"
+        CACHE PATH "NVIDIA Video Codec SDK include directory"
+        FORCE
+    )
+endif()
+
 if(FASTRECORD_NVENC_INCLUDE_DIR)
+    set(FASTRECORD_HAS_NVENC 1)
     target_include_directories(fast-record PRIVATE ${FASTRECORD_NVENC_INCLUDE_DIR})
     target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_NVENC=1)
 else()
+    set(FASTRECORD_HAS_NVENC 0)
     target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_NVENC=0)
 endif()
+
+add_executable(nvenc-smoke EXCLUDE_FROM_ALL
+    tests/NvencSmoke.cpp
+    src/recording/NvencBackend.cpp
+    src/recording/GraphicsCapture.cpp
+)
+target_include_directories(nvenc-smoke PRIVATE src)
+if(FASTRECORD_NVENC_INCLUDE_DIR)
+    target_include_directories(nvenc-smoke PRIVATE ${FASTRECORD_NVENC_INCLUDE_DIR})
+endif()
+target_compile_definitions(nvenc-smoke PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
+    FASTRECORD_HAS_NVENC=${FASTRECORD_HAS_NVENC}
+)
+if(MSVC)
+    target_compile_options(nvenc-smoke PRIVATE /W4 /permissive- /utf-8)
+endif()
+target_link_libraries(nvenc-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite mfuuid ole32 user32)
 
 # AMF is also optional. The headers are used at build time; the AMD runtime is
 # loaded from the installed display driver at runtime.

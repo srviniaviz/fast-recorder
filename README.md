@@ -11,7 +11,7 @@
 O Fast Record vive na bandeja do sistema e abre um painel compacto quando você precisa dele. A ideia é simples: escolher a fonte, ajustar a qualidade e começar a captura sem atravessar assistentes ou telas desnecessárias.
 
 > [!IMPORTANT]
-> O projeto está em desenvolvimento. A captura do monitor em MP4 já funciona; áudio, captura de janela/região e os backends diretos NVENC/AMF ainda estão em implementação.
+> O projeto está em desenvolvimento. A captura do monitor em MP4 já funciona; áudio, captura de janela/região e o backend direto AMD AMF ainda estão em implementação.
 
 ## O que já está pronto
 
@@ -20,6 +20,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - controles de gravar, pausar e parar;
 - captura do monitor atual em MP4/H.264;
 - codificação por software ou seleção automática do Media Foundation;
+- codificação direta por NVENC quando a GPU NVIDIA compatível está disponível;
 - resolução configurável de 720p a 4K;
 - bitrate ajustável entre 4 e 80 Mbps;
 - preferências restauradas depois de fechar e abrir o aplicativo;
@@ -43,13 +44,14 @@ A janela é nativa em C++, com a camada visual renderizada pelo WebView2. Isso m
             │
             ▼
     RecorderController
-            │
-            ▼
-    Media Foundation ── MP4 / H.264
+        ┌───┴──────────────┐
+        ▼                  ▼
+   NVENC direto       Media Foundation
+   MP4 / H.264        MP4 / H.264
 
 A captura usa Windows Graphics Capture, com redimensionamento pelo Direct3D 11. A proporção do monitor é preservada: resoluções diferentes recebem margens pretas quando necessário. O cursor é capturado pelo Windows.
 
-Os frames ainda são copiados para memória antes da codificação H.264 pelo Media Foundation. A seleção direta de NVENC/AMF e o envio de texturas ao encoder sem essa cópia são os próximos passos. Por enquanto, essas duas opções usam a seleção automática do Media Foundation e não garantem um fabricante específico.
+No modo software/automático, os frames são copiados para memória antes da codificação H.264 pelo Media Foundation. No modo NVENC, a textura D3D11 da captura vai direto para o encoder da NVIDIA e o pacote H.264 é muxado em MP4 localmente. O backend AMD AMF ainda será conectado ao mesmo fluxo.
 
 Se o monitor for desconectado, sua resolução mudar ou a GPU falhar, o app tenta finalizar o MP4 e informa o erro. É necessário iniciar uma nova gravação após a mudança. Conteúdo protegido pode não aparecer; HDR ainda não tem tratamento de cor dedicado.
 
@@ -98,9 +100,17 @@ O instalador cria atalhos no Menu Iniciar e na área de trabalho, registra o
 desinstalador e não precisa de privilégios de administrador. O Microsoft Edge
 WebView2 Runtime continua sendo um requisito do Windows.
 
-### Sonda completa do NVENC
+### NVENC
+
+O CMake busca automaticamente uma versão fixada dos headers do NVENC quando o SDK não está instalado. Para usar um SDK local:
 
     cmake -S . -B build -A x64 -DFASTRECORD_NVENC_SDK_DIR="C:\SDKs\Video_Codec_SDK"
+    cmake --build build --config Release
+
+O teste direto captura três segundos usando a GPU NVIDIA e gera um MP4 em `build/nvenc-smoke-output`:
+
+    cmake --build build --config Debug --target nvenc-smoke
+    build\Debug\nvenc-smoke.exe build\nvenc-smoke-output
 
 ### Sonda completa do AMD AMF
 
@@ -122,7 +132,8 @@ Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibli
 - [x] gravar o monitor atual em MP4/H.264;
 - [x] migrar a captura para Windows Graphics Capture e Direct3D 11;
 - [ ] capturar microfone e áudio do sistema com WASAPI;
-- [ ] conectar NVENC e AMD AMF ao fluxo de frames;
+- [x] conectar NVENC ao fluxo de frames;
+- [ ] conectar AMD AMF ao fluxo de frames;
 - [ ] implementar captura de janela e região;
 - [ ] listar e reproduzir gravações recentes;
 - [x] empacotar versões automaticamente pelo GitHub Actions.

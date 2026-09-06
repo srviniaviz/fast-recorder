@@ -1,5 +1,6 @@
 #include "recording/RecorderController.h"
 #include "recording/MediaFoundationBackend.h"
+#include "recording/NvencBackend.h"
 
 #include <utility>
 
@@ -18,6 +19,13 @@ OperationResult RecorderController::start(const RecordingSettings& settings) {
     m_state = RecorderState::Starting;
     RecordingSettings effectiveSettings = settings;
     effectiveSettings.engine = m_engine;
+
+    if (m_engine == EncoderEngine::Nvenc) {
+        m_backend = std::make_unique<NvencBackend>();
+    } else {
+        m_backend = std::make_unique<MediaFoundationBackend>();
+    }
+
     if (!m_backend->start(effectiveSettings, m_lastError)) {
         m_state = RecorderState::Idle;
         return {false, m_lastError};
