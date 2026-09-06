@@ -1,0 +1,10 @@
+/build/
+/build-next/
+/build-latest/
+/build-webview/
+/out/
+/.vs/
+*.user
+*.suo
+*.vcxproj
+*.vcxproj.filters

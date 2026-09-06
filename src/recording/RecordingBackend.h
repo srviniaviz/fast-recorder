@@ -1,0 +1,43 @@
+#pragma once
+
+#include <Windows.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+
+namespace fastrecord::recording {
+
+enum class CaptureTargetKind {
+    CurrentMonitor,
+    SelectedMonitor,
+    SelectedWindow,
+};
+
+struct CaptureTarget {
+    CaptureTargetKind kind{CaptureTargetKind::CurrentMonitor};
+    HMONITOR monitor{nullptr};
+    HWND window{nullptr};
+};
+
+struct RecordingSettings {
+    CaptureTarget target{};
+    std::filesystem::path outputDirectory{};
+    std::uint32_t width{1920};
+    std::uint32_t height{1080};
+    std::uint32_t framesPerSecond{30};
+    bool captureCursor{true};
+    bool captureSystemAudio{true};
+    bool captureMicrophone{false};
+};
+
+class IRecordingBackend {
+public:
+    virtual ~IRecordingBackend() = default;
+
+    virtual bool start(const RecordingSettings& settings, std::wstring& error) = 0;
+    virtual bool stop(std::wstring& error) = 0;
+};
+
+} // namespace fastrecord::recording
+

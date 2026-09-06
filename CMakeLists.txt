@@ -1,0 +1,95 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(FastRecord VERSION 0.1.0 LANGUAGES CXX)
+
+include(FetchContent)
+
+set(FASTRECORD_WEBVIEW2_VERSION "1.0.4191.47" CACHE STRING "WebView2 SDK version")
+FetchContent_Declare(
+    webview2
+    URL "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${FASTRECORD_WEBVIEW2_VERSION}"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(webview2)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_executable(fast-record WIN32
+    src/main.cpp
+    src/app/AppController.cpp
+    src/app/AppSettings.cpp
+    src/platform/TrayIcon.cpp
+    src/recording/AmfProbe.cpp
+    src/recording/NvencProbe.cpp
+    src/recording/RecorderController.cpp
+    src/resources/FastRecord.rc
+    src/ui/WebViewHost.cpp
+)
+
+target_include_directories(fast-record PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${webview2_SOURCE_DIR}/build/native/include
+)
+
+target_compile_definitions(fast-record PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WIN32_WINNT=0x0A00
+)
+
+if(MSVC)
+    target_compile_options(fast-record PRIVATE /W4 /permissive- /utf-8)
+endif()
+
+target_link_libraries(fast-record PRIVATE
+    ${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib
+    advapi32
+    d3d11
+    gdi32
+    ole32
+    oleaut32
+    shell32
+    shlwapi
+    user32
+    version
+)
+
+# NVENC is intentionally loaded at runtime. The SDK headers are only needed
+# when compiling the optional capability probe and encoder backend.
+set(FASTRECORD_NVENC_SDK_DIR "" CACHE PATH "NVIDIA Video Codec SDK directory")
+find_path(FASTRECORD_NVENC_INCLUDE_DIR
+    NAMES nvEncodeAPI.h
+    HINTS
+        "${FASTRECORD_NVENC_SDK_DIR}"
+        "$ENV{FASTRECORD_NVENC_SDK_DIR}"
+    PATH_SUFFIXES Interface include Include
+)
+
+if(FASTRECORD_NVENC_INCLUDE_DIR)
+    target_include_directories(fast-record PRIVATE ${FASTRECORD_NVENC_INCLUDE_DIR})
+    target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_NVENC=1)
+else()
+    target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_NVENC=0)
+endif()
+
+# AMF is also optional. The headers are used at build time; the AMD runtime is
+# loaded from the installed display driver at runtime.
+set(FASTRECORD_AMF_SDK_DIR "" CACHE PATH "AMD Advanced Media Framework SDK directory")
+find_path(FASTRECORD_AMF_INCLUDE_DIR
+    NAMES core/Factory.h
+    HINTS
+        "${FASTRECORD_AMF_SDK_DIR}"
+        "$ENV{FASTRECORD_AMF_SDK_DIR}"
+    PATH_SUFFIXES amf/public/include public/include
+)
+
+if(FASTRECORD_AMF_INCLUDE_DIR)
+    target_include_directories(fast-record PRIVATE ${FASTRECORD_AMF_INCLUDE_DIR})
+    target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_AMF=1)
+else()
+    target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_AMF=0)
+endif()
