@@ -1,4 +1,5 @@
 #include "recording/MediaFoundationBackend.h"
+#include "recording/AudioCapture.h"
 #include "recording/GraphicsCapture.h"
 
 #include <Windows.h>
@@ -22,6 +23,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr LONGLONG kHundredNanosecondsPerSecond = 10'000'000;
+constexpr std::uint32_t kAudioBitrate = 192'000;
 
 struct MediaRuntime {
     MediaRuntime() {
@@ -63,6 +65,75 @@ std::filesystem::path createOutputPath(const std::filesystem::path& directory) {
         now.wSecond,
         now.wMilliseconds);
     return directory / name;
+}
+
+HRESULT configureAudioStream(IMFSinkWriter* writer, DWORD& streamIndex) {
+    ComPtr<IMFMediaType> outputType;
+    HRESULT result = MFCreateMediaType(&outputType);
+    if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, AudioCapture::kChannels);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, AudioCapture::kSampleRate);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, AudioCapture::kBitsPerSample);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, kAudioBitrate / 8);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+    if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+    if (SUCCEEDED(result)) result = writer->AddStream(outputType.Get(), &streamIndex);
+
+    ComPtr<IMFMediaType> inputType;
+    if (SUCCEEDED(result)) result = MFCreateMediaType(&inputType);
+    if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+    if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, AudioCapture::kChannels);
+    if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, AudioCapture::kSampleRate);
+    if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, AudioCapture::kBitsPerSample);
+    if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, AudioCapture::kBlockAlignment);
+    if (SUCCEEDED(result)) {
+        result = inputType->SetUINT32(
+            MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+            AudioCapture::kSampleRate * AudioCapture::kBlockAlignment);
+    }
+    if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+    if (SUCCEEDED(result)) result = writer->SetInputMediaType(streamIndex, inputType.Get(), nullptr);
+    return result;
+}
+
+HRESULT writeAudioSample(
+    IMFSinkWriter* writer,
+    DWORD streamIndex,
+    const std::vector<std::uint8_t>& pcm,
+    std::uint32_t frameCount,
+    std::uint64_t firstFrame) {
+    if (pcm.empty() || frameCount == 0) {
+        return S_OK;
+    }
+
+    ComPtr<IMFMediaBuffer> buffer;
+    HRESULT result = MFCreateMemoryBuffer(static_cast<DWORD>(pcm.size()), &buffer);
+    BYTE* destination = nullptr;
+    if (SUCCEEDED(result)) result = buffer->Lock(&destination, nullptr, nullptr);
+    if (SUCCEEDED(result)) {
+        std::memcpy(destination, pcm.data(), pcm.size());
+        buffer->Unlock();
+        destination = nullptr;
+        result = buffer->SetCurrentLength(static_cast<DWORD>(pcm.size()));
+    }
+    if (destination != nullptr) buffer->Unlock();
+
+    ComPtr<IMFSample> sample;
+    if (SUCCEEDED(result)) result = MFCreateSample(&sample);
+    if (SUCCEEDED(result)) result = sample->AddBuffer(buffer.Get());
+    if (SUCCEEDED(result)) {
+        result = sample->SetSampleTime(
+            static_cast<LONGLONG>(firstFrame * kHundredNanosecondsPerSecond / AudioCapture::kSampleRate));
+    }
+    if (SUCCEEDED(result)) {
+        result = sample->SetSampleDuration(
+            static_cast<LONGLONG>(frameCount) * kHundredNanosecondsPerSecond / AudioCapture::kSampleRate);
+    }
+    if (SUCCEEDED(result)) result = writer->WriteSample(streamIndex, sample.Get());
+    return result;
 }
 
 } // namespace
@@ -210,6 +281,11 @@ void MediaFoundationBackend::recordLoop(
         return;
     }
 
+    std::unique_ptr<AudioCapture> audioCapture;
+    if (settings.captureMicrophone || settings.captureSystemAudio) {
+        audioCapture = std::make_unique<AudioCapture>();
+    }
+
     ComPtr<IMFAttributes> attributes;
     HRESULT result = MFCreateAttributes(&attributes, 2);
     if (SUCCEEDED(result)) {
@@ -286,12 +362,31 @@ void MediaFoundationBackend::recordLoop(
     if (SUCCEEDED(result)) {
         result = writer->SetInputMediaType(streamIndex, inputType.Get(), nullptr);
     }
+    DWORD audioStreamIndex = static_cast<DWORD>(MF_SINK_WRITER_INVALID_STREAM_INDEX);
+    if (SUCCEEDED(result) && audioCapture) {
+        result = configureAudioStream(writer.Get(), audioStreamIndex);
+    }
     if (SUCCEEDED(result)) {
         result = writer->BeginWriting();
     }
 
     if (FAILED(result)) {
         reportStartup(hresultMessage(L"Não foi possível iniciar o encoder H.264", result));
+        writer.Reset();
+        inputType.Reset();
+        outputType.Reset();
+        attributes.Reset();
+        capture.reset();
+        return;
+    }
+
+    std::wstring audioStartupError;
+    if (audioCapture && !audioCapture->start(
+            settings.captureMicrophone,
+            settings.captureSystemAudio,
+            audioStartupError)) {
+        writer->Finalize();
+        reportStartup(audioStartupError);
         writer.Reset();
         inputType.Reset();
         outputType.Reset();
@@ -308,12 +403,46 @@ void MediaFoundationBackend::recordLoop(
     auto nextFrame = std::chrono::steady_clock::now();
     HRESULT writeResult = S_OK;
     const wchar_t* writeStage = L"o encoder de vídeo";
+    std::uint64_t audioFramesWritten = 0;
+    std::vector<std::uint8_t> audioPcm;
+    std::wstring audioReadError;
+
+    const auto captureAudio = [&](bool writeSamples) {
+        if (!audioCapture) {
+            return true;
+        }
+        std::uint32_t audioFrameCount = 0;
+        if (!audioCapture->read(audioPcm, audioFrameCount, audioReadError)) {
+            return false;
+        }
+        if (!writeSamples || audioFrameCount == 0) {
+            return true;
+        }
+        writeStage = L"o áudio do microfone";
+        writeResult = writeAudioSample(
+            writer.Get(),
+            audioStreamIndex,
+            audioPcm,
+            audioFrameCount,
+            audioFramesWritten);
+        if (SUCCEEDED(writeResult)) {
+            audioFramesWritten += audioFrameCount;
+        }
+        return SUCCEEDED(writeResult);
+    };
 
     while (!m_stopRequested.load()) {
         if (m_paused.load()) {
+            if (!captureAudio(false)) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
             nextFrame = std::chrono::steady_clock::now();
             continue;
+        }
+
+        if (!captureAudio(true)) {
+            break;
         }
 
         try {
@@ -372,8 +501,14 @@ void MediaFoundationBackend::recordLoop(
         }
     }
 
+    if (SUCCEEDED(writeResult) && audioReadError.empty()) {
+        captureAudio(true);
+    }
+
     const HRESULT finalizeResult = writer->Finalize();
-    if (FAILED(writeResult)) {
+    if (!audioReadError.empty()) {
+        setWorkerError(audioReadError);
+    } else if (FAILED(writeResult)) {
         setWorkerError(hresultMessage(writeStage, writeResult));
     } else if (FAILED(finalizeResult)) {
         setWorkerError(hresultMessage(L"Não foi possível finalizar o arquivo MP4", finalizeResult));
@@ -384,6 +519,7 @@ void MediaFoundationBackend::recordLoop(
     inputType.Reset();
     outputType.Reset();
     attributes.Reset();
+    audioCapture.reset();
     capture.reset();
 }
 

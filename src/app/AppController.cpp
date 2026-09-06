@@ -8,14 +8,20 @@
 #include "ui/AppPage.h"
 
 #include <Windows.h>
+#include <propkey.h>
+#include <propsys.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cwchar>
+#include <cwctype>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace fastrecord {
 
@@ -110,8 +116,7 @@ bool AppController::initialize() {
     m_framesPerSecond = savedSettings.framesPerSecond;
     m_bitrateMbps = savedSettings.bitrateMbps;
     m_microphoneEnabled = savedSettings.microphoneEnabled;
-    // Webcam capture is intentionally unavailable until its backend is implemented.
-    m_webcamEnabled = false;
+    m_systemAudioEnabled = savedSettings.systemAudioEnabled;
     m_alwaysOnTop = savedSettings.alwaysOnTop;
     m_settingsLoaded = true;
 
@@ -124,6 +129,7 @@ bool AppController::initialize() {
 
     m_nvencProbe = recording::probeNvenc();
     m_amfProbe = recording::probeAmf();
+    refreshRecordings();
 
     if (!createMainWindow() || !createTrayIcon()) {
         shutdown();
@@ -267,7 +273,7 @@ bool AppController::createTrayIcon() {
         m_window,
         m_icon,
         kTrayTooltip,
-        [this](LPARAM event) { handleTrayEvent(event); });
+        [this](LPARAM event) { handleTrayEvent(0, event); });
 }
 
 bool AppController::registerHotkeys() {
@@ -362,12 +368,26 @@ void AppController::showMainWindow() {
     UpdateWindow(m_window);
 }
 
-void AppController::handleTrayEvent(LPARAM event) {
-    switch (event) {
+void AppController::handleTrayEvent(WPARAM eventCode, LPARAM eventData) {
+    const UINT event = static_cast<UINT>(LOWORD(eventData));
+    const UINT alternateEvent = static_cast<UINT>(LOWORD(eventCode));
+    const auto isMouseOrSelectionEvent = [](UINT value) {
+        return value == WM_LBUTTONDOWN || value == WM_LBUTTONUP ||
+            value == WM_LBUTTONDBLCLK || value == NIN_SELECT ||
+            value == NIN_KEYSELECT || value == WM_RBUTTONDOWN ||
+            value == WM_RBUTTONUP || value == WM_CONTEXTMENU;
+    };
+    const UINT normalizedEvent = isMouseOrSelectionEvent(event) ? event : alternateEvent;
+
+    switch (normalizedEvent) {
+    case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
     case WM_LBUTTONDBLCLK:
+    case NIN_SELECT:
+    case NIN_KEYSELECT:
         showMainWindow();
         break;
+    case WM_RBUTTONDOWN:
     case WM_RBUTTONUP:
     case WM_CONTEXTMENU:
         showTrayMenu();
@@ -434,11 +454,37 @@ void AppController::handleWebMessage(const std::wstring& message) {
         m_microphoneEnabled = !m_microphoneEnabled;
         persistSettings();
         syncInterface();
-    } else if (message == L"toggle-webcam") {
-        m_webcamEnabled = false;
+    } else if (message == L"toggle-system-audio") {
+        m_systemAudioEnabled = !m_systemAudioEnabled;
+        persistSettings();
         syncInterface();
     } else if (message == L"open-folder") {
         openRecordingsFolder();
+    } else if (message == L"refresh-recordings") {
+        refreshRecordings();
+        syncInterface();
+    } else if (message.starts_with(L"open-recording:") || message.starts_with(L"show-recording:")) {
+        const bool reveal = message.starts_with(L"show-recording:");
+        const std::filesystem::path recordingPath(message.substr(15));
+        const auto directory = recordingsDirectory();
+        std::error_code pathError;
+        std::wstring extension = recordingPath.extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t character) {
+            return static_cast<wchar_t>(std::towlower(character));
+        });
+        const bool isMp4 = extension == L".mp4";
+        const bool isInRecordingsDirectory =
+            std::filesystem::equivalent(recordingPath.parent_path(), directory, pathError) &&
+            !pathError;
+        if (isMp4 && isInRecordingsDirectory &&
+            std::filesystem::exists(recordingPath, pathError) && !pathError) {
+            if (reveal) {
+                const std::wstring parameters = L"/select,\"" + recordingPath.wstring() + L"\"";
+                ShellExecuteW(m_window, L"open", L"explorer.exe", parameters.c_str(), nullptr, SW_SHOWNORMAL);
+            } else {
+                ShellExecuteW(m_window, L"open", recordingPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
     } else if (message == L"pin") {
         m_alwaysOnTop = !m_alwaysOnTop;
         SetWindowPos(
@@ -526,15 +572,17 @@ void AppController::syncInterface() {
         L"recording:" + std::wstring(jsonBoolean(m_recorder.isRecording())) +
         L",paused:" + std::wstring(jsonBoolean(m_recorder.isPaused())) +
         L",microphone:" + std::wstring(jsonBoolean(m_microphoneEnabled)) +
-        L",webcam:" + std::wstring(jsonBoolean(m_webcamEnabled)) +
+        L",systemAudio:" + std::wstring(jsonBoolean(m_systemAudioEnabled)) +
         L",pinned:" + std::wstring(jsonBoolean(m_alwaysOnTop)) +
+        L",elapsedSeconds:" + std::to_wstring(recordingElapsedSeconds()) +
         L",bitrate:" + std::to_wstring(m_bitrateMbps) +
         L",resolution:\"" + escapeJavaScriptString(m_resolution) +
         L"\",fps:\"" + std::to_wstring(m_framesPerSecond) +
         L"\",engine:\"" + escapeJavaScriptString(engineValue()) +
         L"\",codec:\"" + escapeJavaScriptString(codecValue()) +
         L"\",area:\"" + escapeJavaScriptString(m_area) +
-        L"\",status:\"" + escapeJavaScriptString(statusText()) +
+        L"\",recordings:" + m_recordingsJson +
+        L",status:\"" + escapeJavaScriptString(statusText()) +
         L"\",capability:\"" + escapeJavaScriptString(selectedEngineStatus()) +
         L"\"});";
     m_webView.executeScript(script);
@@ -554,7 +602,7 @@ void AppController::persistSettings() {
         m_framesPerSecond,
         m_bitrateMbps,
         m_microphoneEnabled,
-        m_webcamEnabled,
+        m_systemAudioEnabled,
         m_alwaysOnTop,
     };
     saveAppSettings(settings);
@@ -603,13 +651,26 @@ void AppController::startRecording() {
     settings.bitrateMbps = static_cast<std::uint32_t>(m_bitrateMbps);
     settings.codec = m_codec;
     settings.captureCursor = true;
-    settings.captureSystemAudio = false;
-    settings.captureMicrophone = false;
+    settings.captureSystemAudio = m_systemAudioEnabled;
+    settings.captureMicrophone = m_microphoneEnabled;
 
     const auto result = m_recorder.start(settings);
     m_status = result.message;
-    if (result.success && m_microphoneEnabled) {
-        m_status = L"Gravando vídeo; o microfone será conectado na próxima etapa.";
+    if (result.success) {
+        m_recordingElapsed = std::chrono::milliseconds{0};
+        m_recordingResumedAt = std::chrono::steady_clock::now();
+        m_recordingClockRunning = true;
+    }
+    if (result.success) {
+        if (m_microphoneEnabled && m_systemAudioEnabled) {
+            m_status = L"Gravando tela, microfone e áudio do PC.";
+        } else if (m_microphoneEnabled) {
+            m_status = L"Gravando tela e microfone.";
+        } else if (m_systemAudioEnabled) {
+            m_status = L"Gravando tela e áudio do PC.";
+        } else {
+            m_status = L"Gravando tela sem áudio.";
+        }
     }
     if (!result.success) {
         m_tray.showBalloon(L"Fast Record", result.message, NIIF_WARNING);
@@ -620,6 +681,16 @@ void AppController::startRecording() {
 void AppController::togglePause() {
     const auto result = m_recorder.isPaused() ? m_recorder.resume() : m_recorder.pause();
     m_status = result.message;
+    if (result.success) {
+        if (m_recorder.isPaused()) {
+            m_recordingElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - m_recordingResumedAt);
+            m_recordingClockRunning = false;
+        } else {
+            m_recordingResumedAt = std::chrono::steady_clock::now();
+            m_recordingClockRunning = true;
+        }
+    }
     if (!result.success) {
         m_tray.showBalloon(L"Fast Record", result.message, NIIF_WARNING);
     }
@@ -627,6 +698,11 @@ void AppController::togglePause() {
 }
 
 void AppController::stopRecording() {
+    if (m_recordingClockRunning) {
+        m_recordingElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_recordingResumedAt);
+    }
+    m_recordingClockRunning = false;
     const auto result = m_recorder.stop();
     const auto output = m_recorder.outputPath();
     m_status = result.success && !output.empty()
@@ -636,6 +712,7 @@ void AppController::stopRecording() {
         L"Fast Record",
         result.message,
         result.success ? NIIF_INFO : NIIF_WARNING);
+    refreshRecordings();
     syncInterface();
 }
 
@@ -721,6 +798,17 @@ std::wstring AppController::statusText() const {
     return m_status;
 }
 
+std::uint64_t AppController::recordingElapsedSeconds() const {
+    auto elapsed = m_recordingElapsed;
+    if (m_recordingClockRunning) {
+        elapsed += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_recordingResumedAt);
+    }
+    return elapsed.count() > 0
+        ? static_cast<std::uint64_t>(elapsed.count() / 1000)
+        : 0;
+}
+
 std::filesystem::path AppController::recordingsDirectory() const {
     PWSTR rawPath = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_Videos, KF_FLAG_DEFAULT, nullptr, &rawPath)) ||
@@ -732,6 +820,142 @@ std::filesystem::path AppController::recordingsDirectory() const {
     CoTaskMemFree(rawPath);
     directory /= L"Fast Record";
     return directory;
+}
+
+void AppController::refreshRecordings() {
+    struct RecordingFile {
+        std::filesystem::path path;
+        std::filesystem::file_time_type modified;
+        std::uintmax_t size{0};
+        std::uint64_t duration{0};
+    };
+
+    std::vector<RecordingFile> files;
+    const auto directory = recordingsDirectory();
+    std::error_code error;
+    if (directory.empty() || !std::filesystem::exists(directory, error) || error) {
+        m_recordingsJson = L"[]";
+        return;
+    }
+
+    for (std::filesystem::directory_iterator iterator(
+             directory, std::filesystem::directory_options::skip_permission_denied, error),
+         end;
+         iterator != end && !error;
+         iterator.increment(error)) {
+        const auto& entry = *iterator;
+        std::error_code entryError;
+        if (!entry.is_regular_file(entryError) || entryError) {
+            continue;
+        }
+
+        std::wstring extension = entry.path().extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t character) {
+            return static_cast<wchar_t>(std::towlower(character));
+        });
+        if (extension != L".mp4") {
+            continue;
+        }
+
+        const auto modified = entry.last_write_time(entryError);
+        if (entryError) {
+            continue;
+        }
+        const auto size = entry.file_size(entryError);
+        std::uint64_t duration = 0;
+        Microsoft::WRL::ComPtr<IPropertyStore> properties;
+        if (SUCCEEDED(SHGetPropertyStoreFromParsingName(
+                entry.path().c_str(),
+                nullptr,
+                GPS_BESTEFFORT,
+                IID_PPV_ARGS(&properties)))) {
+            PROPVARIANT value{};
+            PropVariantInit(&value);
+            if (SUCCEEDED(properties->GetValue(PKEY_Media_Duration, &value)) && value.vt == VT_UI8) {
+                duration = value.uhVal.QuadPart / 10'000'000ull;
+            }
+            PropVariantClear(&value);
+        }
+        files.push_back({entry.path(), modified, entryError ? 0 : size, duration});
+    }
+
+    std::sort(files.begin(), files.end(), [](const RecordingFile& left, const RecordingFile& right) {
+        return left.modified > right.modified;
+    });
+    if (files.size() > 50) {
+        files.resize(50);
+    }
+
+    const auto formatSize = [](std::uintmax_t bytes) {
+        std::wostringstream output;
+        if (bytes >= 1024ull * 1024ull * 1024ull) {
+            output << std::fixed << std::setprecision(1)
+                << (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0)) << L" GB";
+        } else if (bytes >= 1024ull * 1024ull) {
+            output << std::fixed << std::setprecision(1)
+                << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << L" MB";
+        } else {
+            output << std::max<std::uintmax_t>(1, bytes / 1024ull) << L" KB";
+        }
+        return output.str();
+    };
+
+    const auto formatTime = [](const std::filesystem::path& path) {
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attributes)) {
+            return std::wstring(L"Data desconhecida");
+        }
+
+        FILETIME localTime{};
+        SYSTEMTIME systemTime{};
+        if (!FileTimeToLocalFileTime(&attributes.ftLastWriteTime, &localTime) ||
+            !FileTimeToSystemTime(&localTime, &systemTime)) {
+            return std::wstring(L"Data desconhecida");
+        }
+
+        wchar_t formatted[64]{};
+        swprintf_s(
+            formatted,
+            _countof(formatted),
+            L"%02u/%02u/%04u · %02u:%02u",
+            static_cast<unsigned>(systemTime.wDay),
+            static_cast<unsigned>(systemTime.wMonth),
+            static_cast<unsigned>(systemTime.wYear),
+            static_cast<unsigned>(systemTime.wHour),
+            static_cast<unsigned>(systemTime.wMinute));
+        return std::wstring(formatted);
+    };
+
+    const auto formatDuration = [](std::uint64_t seconds) {
+        if (seconds == 0) {
+            return std::wstring{};
+        }
+        const auto hours = seconds / 3600;
+        const auto minutes = (seconds % 3600) / 60;
+        const auto remainder = seconds % 60;
+        wchar_t formatted[24]{};
+        if (hours > 0) {
+            swprintf_s(formatted, _countof(formatted), L"%02llu:%02llu:%02llu", hours, minutes, remainder);
+        } else {
+            swprintf_s(formatted, _countof(formatted), L"%02llu:%02llu", minutes, remainder);
+        }
+        return std::wstring(formatted);
+    };
+
+    std::wstring json = L"[";
+    for (size_t index = 0; index < files.size(); ++index) {
+        if (index != 0) {
+            json += L",";
+        }
+        const auto& file = files[index];
+        json += L"{\"name\":\"" + escapeJavaScriptString(file.path.filename().wstring()) +
+            L"\",\"path\":\"" + escapeJavaScriptString(file.path.wstring()) +
+            L"\",\"size\":\"" + escapeJavaScriptString(formatSize(file.size)) +
+            L"\",\"duration\":\"" + escapeJavaScriptString(formatDuration(file.duration)) +
+            L"\",\"time\":\"" + escapeJavaScriptString(formatTime(file.path)) + L"\"}";
+    }
+    json += L"]";
+    m_recordingsJson = std::move(json);
 }
 
 void AppController::openRecordingsFolder() {
@@ -785,7 +1009,7 @@ LRESULT AppController::handleMessage(
     LPARAM lParam) {
     if (message == platform::TrayIcon::kCallbackMessage) {
         if (m_tray.isCreated()) {
-            handleTrayEvent(lParam);
+            handleTrayEvent(wParam, lParam);
         }
         return 0;
     }
@@ -797,8 +1021,12 @@ LRESULT AppController::handleMessage(
 
     switch (message) {
     case WM_TIMER:
-        if (wParam == 1 && m_recorder.hasFinished()) {
-            stopRecording();
+        if (wParam == 1) {
+            if (m_recorder.hasFinished()) {
+                stopRecording();
+            } else if (m_recorder.isRecording()) {
+                syncInterface();
+            }
         }
         return 0;
     case WM_CLOSE:

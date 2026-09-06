@@ -109,7 +109,7 @@ AppSettings loadAppSettings() {
         4,
         80);
     settings.microphoneEnabled = readDword(key, L"MicrophoneEnabled", 1) != 0;
-    settings.webcamEnabled = readDword(key, L"WebcamEnabled", 0) != 0;
+    settings.systemAudioEnabled = readDword(key, L"SystemAudioEnabled", 1) != 0;
     settings.alwaysOnTop = readDword(key, L"AlwaysOnTop", 0) != 0;
 
     RegCloseKey(key);
@@ -140,7 +140,7 @@ bool saveAppSettings(const AppSettings& settings) {
             isValidFrameRate(settings.framesPerSecond) ? settings.framesPerSecond : 30)) &&
         writeDword(key, L"BitrateMbps", static_cast<DWORD>(std::clamp(settings.bitrateMbps, 4, 80))) &&
         writeDword(key, L"MicrophoneEnabled", settings.microphoneEnabled ? 1u : 0u) &&
-        writeDword(key, L"WebcamEnabled", settings.webcamEnabled ? 1u : 0u) &&
+        writeDword(key, L"SystemAudioEnabled", settings.systemAudioEnabled ? 1u : 0u) &&
         writeDword(key, L"AlwaysOnTop", settings.alwaysOnTop ? 1u : 0u);
 
     RegCloseKey(key);

@@ -39,6 +39,7 @@ add_executable(fast-record WIN32
     src/platform/CaptureSelector.cpp
     src/platform/TrayIcon.cpp
     src/recording/AmfProbe.cpp
+    src/recording/AudioCapture.cpp
     src/recording/MediaFoundationBackend.cpp
     src/recording/GraphicsCapture.cpp
     src/recording/NvencBackend.cpp
@@ -78,14 +79,17 @@ target_link_libraries(fast-record PRIVATE
     mfuuid
     ole32
     oleaut32
+    propsys
     shell32
     shlwapi
     user32
     version
+    wmcodecdspuuid
 )
 
 add_executable(capture-smoke EXCLUDE_FROM_ALL
     tests/CaptureSmoke.cpp
+    src/recording/AudioCapture.cpp
     src/recording/MediaFoundationBackend.cpp
     src/recording/GraphicsCapture.cpp
 )
@@ -151,6 +155,7 @@ endif()
 
 add_executable(nvenc-smoke EXCLUDE_FROM_ALL
     tests/NvencSmoke.cpp
+    src/recording/AudioCapture.cpp
     src/recording/NvencBackend.cpp
     src/recording/GraphicsCapture.cpp
 )
@@ -165,7 +170,7 @@ target_compile_definitions(nvenc-smoke PRIVATE
 if(MSVC)
     target_compile_options(nvenc-smoke PRIVATE /W4 /permissive- /utf-8)
 endif()
-target_link_libraries(nvenc-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite mfuuid ole32 user32)
+target_link_libraries(nvenc-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite mfuuid ole32 user32 wmcodecdspuuid)
 
 # AMF is also optional. The headers are used at build time; the AMD runtime is
 # loaded from the installed display driver at runtime.

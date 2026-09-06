@@ -1,12 +1,19 @@
 #include "recording/NvencBackend.h"
+#include "recording/AudioCapture.h"
 #include "recording/GraphicsCapture.h"
 
 #include <Windows.h>
 #include <mfapi.h>
+#include <mferror.h>
+#include <mfidl.h>
+#include <mftransform.h>
 #include <roapi.h>
+#include <wmcodecdsp.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -29,7 +36,10 @@ namespace fastrecord::recording {
 
 namespace {
 
+using Microsoft::WRL::ComPtr;
+
 constexpr LONGLONG kHundredNanosecondsPerSecond = 10'000'000;
+constexpr std::uint32_t kAudioBitrate = 192'000;
 
 std::filesystem::path createOutputPath(const std::filesystem::path& directory) {
     SYSTEMTIME now{};
@@ -804,6 +814,204 @@ bool containsH264NalType(const std::vector<std::uint8_t>& encoded, std::uint8_t 
     return false;
 }
 
+struct EncodedAudioPacket {
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t durationFrames{1024};
+};
+
+class AacEncoder final {
+public:
+    bool initialize(std::wstring& error) {
+        HRESULT result = CoCreateInstance(
+            CLSID_AACMFTEncoder,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&m_transform));
+
+        ComPtr<IMFMediaType> outputType;
+        if (SUCCEEDED(result)) result = MFCreateMediaType(&outputType);
+        if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, AudioCapture::kChannels);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, AudioCapture::kSampleRate);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, AudioCapture::kBitsPerSample);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, kAudioBitrate / 8);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+        if (SUCCEEDED(result)) result = m_transform->SetOutputType(0, outputType.Get(), 0);
+
+        ComPtr<IMFMediaType> inputType;
+        if (SUCCEEDED(result)) result = MFCreateMediaType(&inputType);
+        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, AudioCapture::kChannels);
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, AudioCapture::kSampleRate);
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, AudioCapture::kBitsPerSample);
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, AudioCapture::kBlockAlignment);
+        if (SUCCEEDED(result)) {
+            result = inputType->SetUINT32(
+                MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                AudioCapture::kSampleRate * AudioCapture::kBlockAlignment);
+        }
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+        if (SUCCEEDED(result)) result = m_transform->SetInputType(0, inputType.Get(), 0);
+        if (SUCCEEDED(result)) result = m_transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        if (SUCCEEDED(result)) result = m_transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+        if (FAILED(result)) {
+            wchar_t message[128]{};
+            swprintf_s(
+                message,
+                _countof(message),
+                L"Não foi possível iniciar o encoder AAC (HRESULT 0x%08X).",
+                static_cast<unsigned>(result));
+            error = message;
+            m_transform.Reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool encode(
+        const std::vector<std::uint8_t>& pcm,
+        std::uint32_t frameCount,
+        std::vector<EncodedAudioPacket>& packets,
+        std::wstring& error) {
+        if (!m_transform || pcm.empty() || frameCount == 0) {
+            return true;
+        }
+
+        ComPtr<IMFMediaBuffer> buffer;
+        HRESULT result = MFCreateMemoryBuffer(static_cast<DWORD>(pcm.size()), &buffer);
+        BYTE* destination = nullptr;
+        if (SUCCEEDED(result)) result = buffer->Lock(&destination, nullptr, nullptr);
+        if (SUCCEEDED(result)) {
+            std::memcpy(destination, pcm.data(), pcm.size());
+            buffer->Unlock();
+            destination = nullptr;
+            result = buffer->SetCurrentLength(static_cast<DWORD>(pcm.size()));
+        }
+        if (destination != nullptr) buffer->Unlock();
+
+        ComPtr<IMFSample> sample;
+        if (SUCCEEDED(result)) result = MFCreateSample(&sample);
+        if (SUCCEEDED(result)) result = sample->AddBuffer(buffer.Get());
+        if (SUCCEEDED(result)) {
+            result = sample->SetSampleTime(static_cast<LONGLONG>(
+                m_inputFrames * kHundredNanosecondsPerSecond / AudioCapture::kSampleRate));
+        }
+        if (SUCCEEDED(result)) {
+            result = sample->SetSampleDuration(
+                static_cast<LONGLONG>(frameCount) * kHundredNanosecondsPerSecond /
+                AudioCapture::kSampleRate);
+        }
+
+        if (SUCCEEDED(result)) {
+            result = m_transform->ProcessInput(0, sample.Get(), 0);
+            if (result == MF_E_NOTACCEPTING) {
+                if (!collectOutput(packets, error)) return false;
+                result = m_transform->ProcessInput(0, sample.Get(), 0);
+            }
+        }
+        if (FAILED(result)) {
+            return fail(L"Não foi possível enviar o microfone ao encoder AAC", result, error);
+        }
+        m_inputFrames += frameCount;
+        return collectOutput(packets, error);
+    }
+
+    bool drain(std::vector<EncodedAudioPacket>& packets, std::wstring& error) {
+        if (!m_transform) return true;
+        HRESULT result = m_transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        if (SUCCEEDED(result)) result = m_transform->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+        if (FAILED(result)) return fail(L"Não foi possível finalizar o encoder AAC", result, error);
+        const bool collected = collectOutput(packets, error);
+        m_transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        return collected;
+    }
+
+private:
+    static bool fail(const wchar_t* operation, HRESULT result, std::wstring& error) {
+        wchar_t message[128]{};
+        swprintf_s(
+            message,
+            _countof(message),
+            L"%s (HRESULT 0x%08X).",
+            operation,
+            static_cast<unsigned>(result));
+        error = message;
+        return false;
+    }
+
+    bool collectOutput(std::vector<EncodedAudioPacket>& packets, std::wstring& error) {
+        MFT_OUTPUT_STREAM_INFO streamInfo{};
+        HRESULT result = m_transform->GetOutputStreamInfo(0, &streamInfo);
+        if (FAILED(result)) return fail(L"Não foi possível consultar o encoder AAC", result, error);
+
+        for (;;) {
+            ComPtr<IMFSample> suppliedSample;
+            if ((streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
+                result = MFCreateSample(&suppliedSample);
+                ComPtr<IMFMediaBuffer> outputBuffer;
+                if (SUCCEEDED(result)) {
+                    result = MFCreateMemoryBuffer(
+                        (std::max)(streamInfo.cbSize, static_cast<DWORD>(64 * 1024)),
+                        &outputBuffer);
+                }
+                if (SUCCEEDED(result)) result = suppliedSample->AddBuffer(outputBuffer.Get());
+                if (FAILED(result)) return fail(L"Não foi possível criar o buffer AAC", result, error);
+            }
+
+            MFT_OUTPUT_DATA_BUFFER output{};
+            output.dwStreamID = 0;
+            output.pSample = suppliedSample.Get();
+            DWORD status = 0;
+            result = m_transform->ProcessOutput(0, 1, &output, &status);
+            if (output.pEvents != nullptr) output.pEvents->Release();
+            if (result == MF_E_TRANSFORM_NEED_MORE_INPUT) return true;
+            if (FAILED(result)) return fail(L"Não foi possível obter o áudio AAC", result, error);
+
+            ComPtr<IMFSample> producedSample;
+            if (output.pSample == suppliedSample.Get()) {
+                producedSample = suppliedSample;
+            } else {
+                producedSample.Attach(output.pSample);
+            }
+            if (!producedSample) {
+                error = L"O encoder AAC retornou uma amostra vazia.";
+                return false;
+            }
+
+            ComPtr<IMFMediaBuffer> contiguous;
+            result = producedSample->ConvertToContiguousBuffer(&contiguous);
+            BYTE* data = nullptr;
+            DWORD length = 0;
+            if (SUCCEEDED(result)) result = contiguous->Lock(&data, nullptr, &length);
+            EncodedAudioPacket packet;
+            if (SUCCEEDED(result) && data != nullptr && length > 0) {
+                packet.bytes.assign(data, data + length);
+                contiguous->Unlock();
+                data = nullptr;
+            }
+            if (data != nullptr) contiguous->Unlock();
+            if (FAILED(result)) return fail(L"Não foi possível ler o áudio AAC", result, error);
+
+            LONGLONG duration = 0;
+            if (SUCCEEDED(producedSample->GetSampleDuration(&duration)) && duration > 0) {
+                packet.durationFrames = static_cast<std::uint32_t>((std::max<LONGLONG>)(
+                    1,
+                    (duration * AudioCapture::kSampleRate + kHundredNanosecondsPerSecond / 2) /
+                        kHundredNanosecondsPerSecond));
+            }
+            if (!packet.bytes.empty()) packets.push_back(std::move(packet));
+        }
+    }
+
+    ComPtr<IMFTransform> m_transform;
+    std::uint64_t m_inputFrames{0};
+};
+
 class Mp4Writer final {
 public:
     ~Mp4Writer() {
@@ -819,6 +1027,7 @@ public:
         std::uint32_t bitrate,
         VideoCodec codec,
         const std::vector<std::uint8_t>& sequenceHeader,
+        bool audioEnabled,
         std::wstring& error) {
         m_codec = codec;
         if (m_codec == VideoCodec::H264) {
@@ -841,10 +1050,12 @@ public:
         m_height = height;
         m_timeScale = fps;
         m_bitrate = bitrate;
+        m_audioEnabled = audioEnabled;
         m_mdatOffset = 32;
         m_dataOffset = 48;
         m_dataBytes = 0;
         m_samples.clear();
+        m_audioSamples.clear();
         m_keyFrames.clear();
         m_firstSample = true;
 
@@ -868,6 +1079,33 @@ public:
         }
 
         m_started = true;
+        return true;
+    }
+
+    bool writeAudio(const EncodedAudioPacket& encoded, std::wstring& error) {
+        if (!m_started || !m_audioEnabled) {
+            error = L"A faixa de áudio do contêiner MP4 não está aberta.";
+            return false;
+        }
+        if (encoded.bytes.empty() || encoded.bytes.size() > static_cast<size_t>(UINT32_MAX)) {
+            error = L"O encoder AAC retornou um pacote vazio ou grande demais.";
+            return false;
+        }
+
+        const auto offset = m_dataOffset + m_dataBytes;
+        m_file.seekp(0, std::ios::end);
+        m_file.write(
+            reinterpret_cast<const char*>(encoded.bytes.data()),
+            static_cast<std::streamsize>(encoded.bytes.size()));
+        if (!m_file.good()) {
+            error = L"Não foi possível gravar o áudio AAC no arquivo MP4.";
+            return false;
+        }
+        m_dataBytes += encoded.bytes.size();
+        m_audioSamples.push_back({
+            offset,
+            static_cast<std::uint32_t>(encoded.bytes.size()),
+            encoded.durationFrames});
         return true;
     }
 
@@ -963,6 +1201,12 @@ private:
     struct SampleInfo {
         std::uint64_t offset;
         std::uint32_t size;
+    };
+
+    struct AudioSampleInfo {
+        std::uint64_t offset;
+        std::uint32_t size;
+        std::uint32_t duration;
     };
 
     static bool extractParameterSets(
@@ -1085,8 +1329,163 @@ private:
         }
     }
 
+    void buildAudioSampleEntry(Mp4Builder& builder) const {
+        const size_t mp4a = builder.beginBox("mp4a");
+        builder.zeros(6);
+        builder.u16(1);
+        builder.zeros(8);
+        builder.u16(AudioCapture::kChannels);
+        builder.u16(AudioCapture::kBitsPerSample);
+        builder.u16(0);
+        builder.u16(0);
+        builder.u32(AudioCapture::kSampleRate << 16);
+
+        const size_t esds = builder.beginBox("esds");
+        builder.fullBox(0, 0);
+        builder.u8(0x03);
+        builder.u8(0x19);
+        builder.u16(2);
+        builder.u8(0);
+        builder.u8(0x04);
+        builder.u8(0x11);
+        builder.u8(0x40);
+        builder.u8(0x15);
+        builder.u8(0);
+        builder.u8(0);
+        builder.u8(0);
+        builder.u32(kAudioBitrate);
+        builder.u32(kAudioBitrate);
+        builder.u8(0x05);
+        builder.u8(0x02);
+        builder.u8(0x11);
+        builder.u8(0x90);
+        builder.u8(0x06);
+        builder.u8(0x01);
+        builder.u8(0x02);
+        builder.endBox(esds);
+        builder.endBox(mp4a);
+    }
+
+    void buildAudioTrack(Mp4Builder& builder, std::uint32_t movieDuration) const {
+        std::uint64_t audioDuration = 0;
+        for (const auto& sample : m_audioSamples) audioDuration += sample.duration;
+        const auto mediaDuration = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+            audioDuration,
+            UINT32_MAX));
+
+        const size_t trak = builder.beginBox("trak");
+        const size_t tkhd = builder.beginBox("tkhd");
+        builder.fullBox(0, 0x000007);
+        builder.u32(0);
+        builder.u32(0);
+        builder.u32(2);
+        builder.u32(0);
+        builder.u32(movieDuration);
+        builder.zeros(8);
+        builder.u16(0);
+        builder.u16(0);
+        builder.u16(0x0100);
+        builder.u16(0);
+        writeIdentityMatrix(builder);
+        builder.u32(0);
+        builder.u32(0);
+        builder.endBox(tkhd);
+
+        const size_t mdia = builder.beginBox("mdia");
+        const size_t mdhd = builder.beginBox("mdhd");
+        builder.fullBox(0, 0);
+        builder.u32(0);
+        builder.u32(0);
+        builder.u32(AudioCapture::kSampleRate);
+        builder.u32(mediaDuration);
+        builder.u16(0x55c4);
+        builder.u16(0);
+        builder.endBox(mdhd);
+
+        const size_t hdlr = builder.beginBox("hdlr");
+        builder.fullBox(0, 0);
+        builder.u32(0);
+        builder.fourcc("soun");
+        builder.zeros(12);
+        builder.append({'S', 'o', 'u', 'n', 'd', 'H', 'a', 'n', 'd', 'l', 'e', 'r', 0});
+        builder.endBox(hdlr);
+
+        const size_t minf = builder.beginBox("minf");
+        const size_t smhd = builder.beginBox("smhd");
+        builder.fullBox(0, 0);
+        builder.u16(0);
+        builder.u16(0);
+        builder.endBox(smhd);
+
+        const size_t dinf = builder.beginBox("dinf");
+        const size_t dref = builder.beginBox("dref");
+        builder.fullBox(0, 0);
+        builder.u32(1);
+        const size_t url = builder.beginBox("url ");
+        builder.fullBox(0, 1);
+        builder.endBox(url);
+        builder.endBox(dref);
+        builder.endBox(dinf);
+
+        const size_t stbl = builder.beginBox("stbl");
+        const size_t stsd = builder.beginBox("stsd");
+        builder.fullBox(0, 0);
+        builder.u32(1);
+        buildAudioSampleEntry(builder);
+        builder.endBox(stsd);
+
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> durationRuns;
+        for (const auto& sample : m_audioSamples) {
+            if (!durationRuns.empty() && durationRuns.back().second == sample.duration) {
+                ++durationRuns.back().first;
+            } else {
+                durationRuns.push_back({1, sample.duration});
+            }
+        }
+        const size_t stts = builder.beginBox("stts");
+        builder.fullBox(0, 0);
+        builder.u32(static_cast<std::uint32_t>(durationRuns.size()));
+        for (const auto& [count, duration] : durationRuns) {
+            builder.u32(count);
+            builder.u32(duration);
+        }
+        builder.endBox(stts);
+
+        const size_t stsc = builder.beginBox("stsc");
+        builder.fullBox(0, 0);
+        builder.u32(1);
+        builder.u32(1);
+        builder.u32(1);
+        builder.u32(1);
+        builder.endBox(stsc);
+
+        const size_t stsz = builder.beginBox("stsz");
+        builder.fullBox(0, 0);
+        builder.u32(0);
+        builder.u32(static_cast<std::uint32_t>(m_audioSamples.size()));
+        for (const auto& sample : m_audioSamples) builder.u32(sample.size);
+        builder.endBox(stsz);
+
+        const size_t co64 = builder.beginBox("co64");
+        builder.fullBox(0, 0);
+        builder.u32(static_cast<std::uint32_t>(m_audioSamples.size()));
+        for (const auto& sample : m_audioSamples) builder.u64(sample.offset);
+        builder.endBox(co64);
+        builder.endBox(stbl);
+        builder.endBox(minf);
+        builder.endBox(mdia);
+        builder.endBox(trak);
+    }
+
     void buildMoov(Mp4Builder& builder) const {
         const auto sampleCount = static_cast<std::uint32_t>(m_samples.size());
+        std::uint64_t audioDuration = 0;
+        for (const auto& sample : m_audioSamples) audioDuration += sample.duration;
+        const auto audioMovieDuration = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+            (audioDuration * m_timeScale + AudioCapture::kSampleRate - 1) /
+                AudioCapture::kSampleRate,
+            UINT32_MAX));
+        const auto movieDuration = (std::max)(sampleCount, audioMovieDuration);
         const size_t moov = builder.beginBox("moov");
 
         const size_t mvhd = builder.beginBox("mvhd");
@@ -1094,14 +1493,14 @@ private:
         builder.u32(0);
         builder.u32(0);
         builder.u32(m_timeScale);
-        builder.u32(sampleCount);
+        builder.u32(movieDuration);
         builder.u32(0x00010000);
         builder.u16(0x0100);
         builder.u16(0);
         builder.zeros(8);
         writeIdentityMatrix(builder);
         builder.zeros(24);
-        builder.u32(2);
+        builder.u32(m_audioSamples.empty() ? 2 : 3);
         builder.endBox(mvhd);
 
         const size_t trak = builder.beginBox("trak");
@@ -1211,6 +1610,9 @@ private:
         builder.endBox(minf);
         builder.endBox(mdia);
         builder.endBox(trak);
+        if (!m_audioSamples.empty()) {
+            buildAudioTrack(builder, audioMovieDuration);
+        }
         builder.endBox(moov);
     }
 
@@ -1219,6 +1621,7 @@ private:
     std::vector<std::uint8_t> m_pps;
     std::vector<std::uint8_t> m_av1Configuration;
     std::vector<SampleInfo> m_samples;
+    std::vector<AudioSampleInfo> m_audioSamples;
     std::vector<size_t> m_keyFrames;
     std::uint32_t m_width{0};
     std::uint32_t m_height{0};
@@ -1228,6 +1631,7 @@ private:
     std::uint64_t m_dataOffset{0};
     std::uint64_t m_dataBytes{0};
     VideoCodec m_codec{VideoCodec::H264};
+    bool m_audioEnabled{false};
     bool m_started{false};
     bool m_firstSample{true};
 };
@@ -1775,10 +2179,36 @@ void NvencBackend::recordLoop(
             sequenceHeader = firstPacket;
         }
 
+        std::unique_ptr<AudioCapture> audioCapture;
+        std::unique_ptr<AacEncoder> audioEncoder;
+        if (settings.captureMicrophone || settings.captureSystemAudio) {
+            audioCapture = std::make_unique<AudioCapture>();
+            audioEncoder = std::make_unique<AacEncoder>();
+            std::wstring audioError;
+            if (!audioEncoder->initialize(audioError) ||
+                !audioCapture->start(
+                    settings.captureMicrophone,
+                    settings.captureSystemAudio,
+                    audioError)) {
+                reportStartup(audioError);
+                setWorkerError(audioError);
+                return;
+            }
+        }
+
         Mp4Writer writer;
         const auto output = outputPath();
         std::wstring writerError;
-        if (!writer.start(output, width, height, fps, bitrate, settings.codec, sequenceHeader, writerError)) {
+        if (!writer.start(
+                output,
+                width,
+                height,
+                fps,
+                bitrate,
+                settings.codec,
+                sequenceHeader,
+                audioCapture != nullptr,
+                writerError)) {
             reportStartup(writerError);
             setWorkerError(writerError);
             return;
@@ -1792,14 +2222,32 @@ void NvencBackend::recordLoop(
         m_running = true;
         reportStartup({});
 
+        std::vector<std::uint8_t> audioPcm;
+        std::vector<EncodedAudioPacket> audioPackets;
+        const auto processAudio = [&](bool writeSamples) {
+            if (!audioCapture || !audioEncoder) return true;
+            std::uint32_t audioFrames = 0;
+            if (!audioCapture->read(audioPcm, audioFrames, loopError)) return false;
+            if (!writeSamples || audioFrames == 0) return true;
+            audioPackets.clear();
+            if (!audioEncoder->encode(audioPcm, audioFrames, audioPackets, loopError)) return false;
+            for (const auto& audioPacket : audioPackets) {
+                if (!writer.writeAudio(audioPacket, loopError)) return false;
+            }
+            return true;
+        };
+
         timestamp += frameDuration;
         auto nextFrame = std::chrono::steady_clock::now();
         while (!m_stopRequested.load()) {
             if (m_paused.load()) {
+                if (!processAudio(false)) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(15));
                 nextFrame = std::chrono::steady_clock::now();
                 continue;
             }
+
+            if (!processAudio(true)) break;
 
             if (!capture->update()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1821,6 +2269,20 @@ void NvencBackend::recordLoop(
                 std::this_thread::sleep_until(nextFrame);
             } else if (now - nextFrame > std::chrono::milliseconds(250)) {
                 nextFrame = now;
+            }
+        }
+
+        if (loopError.empty() && !processAudio(true)) {
+            // The audio error is reported below.
+        }
+        if (loopError.empty() && audioEncoder) {
+            audioPackets.clear();
+            if (!audioEncoder->drain(audioPackets, loopError)) {
+                // The audio error is reported below.
+            } else {
+                for (const auto& audioPacket : audioPackets) {
+                    if (!writer.writeAudio(audioPacket, loopError)) break;
+                }
             }
         }
 

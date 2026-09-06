@@ -14,7 +14,7 @@ struct AppSettings {
     int framesPerSecond{30};
     int bitrateMbps{20};
     bool microphoneEnabled{true};
-    bool webcamEnabled{false};
+    bool systemAudioEnabled{true};
     bool alwaysOnTop{false};
 };
 

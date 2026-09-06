@@ -14,7 +14,9 @@ int wmain(int argc, wchar_t** argv) {
     const std::filesystem::path outputDirectory = argc > 1
         ? argv[1]
         : std::filesystem::current_path() / L"nvenc-smoke-output";
-    const bool av1 = argc > 2 && std::wstring(argv[2]) == L"av1";
+    const std::wstring mode = argc > 2 ? argv[2] : L"";
+    const bool av1 = mode == L"av1";
+    const bool systemOnly = mode == L"system";
 
     RecordingSettings settings{};
     settings.target.kind = CaptureTargetKind::CurrentMonitor;
@@ -26,6 +28,8 @@ int wmain(int argc, wchar_t** argv) {
     settings.engine = EncoderEngine::Nvenc;
     settings.codec = av1 ? VideoCodec::Av1 : VideoCodec::H264;
     settings.captureCursor = true;
+    settings.captureMicrophone = !systemOnly;
+    settings.captureSystemAudio = true;
 
     NvencBackend backend;
     std::wstring error;

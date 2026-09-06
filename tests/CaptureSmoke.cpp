@@ -11,7 +11,8 @@ int wmain(int argc, wchar_t** argv) {
     MediaFoundationBackend backend;
     RecordingSettings settings;
     settings.outputDirectory = argv[1];
-    settings.captureSystemAudio = settings.captureMicrophone = false;
+    settings.captureSystemAudio = true;
+    settings.captureMicrophone = true;
     settings.width = 1280;
     settings.height = 720;
     settings.engine = EncoderEngine::Software;

@@ -8,6 +8,8 @@
 
 #include <Windows.h>
 
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -51,7 +53,7 @@ private:
     void unregisterHotkeys();
     void dockWindowToBottom();
     void showMainWindow();
-    void handleTrayEvent(LPARAM event);
+    void handleTrayEvent(WPARAM eventCode, LPARAM eventData);
     void showTrayMenu();
     void handleCommand(UINT_PTR command);
     void handleWebMessage(const std::wstring& message);
@@ -70,7 +72,9 @@ private:
     std::wstring codecValue() const;
     std::wstring selectedEngineStatus() const;
     std::wstring statusText() const;
+    std::uint64_t recordingElapsedSeconds() const;
     std::filesystem::path recordingsDirectory() const;
+    void refreshRecordings();
 
     HINSTANCE m_instance{nullptr};
     HWND m_window{nullptr};
@@ -84,7 +88,7 @@ private:
     bool m_settingsLoaded{false};
     bool m_webViewReady{false};
     bool m_microphoneEnabled{true};
-    bool m_webcamEnabled{false};
+    bool m_systemAudioEnabled{true};
     bool m_alwaysOnTop{false};
     int m_framesPerSecond{30};
     int m_bitrateMbps{20};
@@ -92,6 +96,10 @@ private:
     std::wstring m_area{L"monitor"};
     std::wstring m_resolution{L"1920x1080"};
     std::wstring m_status{L"Pronto para gravar"};
+    std::chrono::steady_clock::time_point m_recordingResumedAt{};
+    std::chrono::milliseconds m_recordingElapsed{0};
+    bool m_recordingClockRunning{false};
+    std::wstring m_recordingsJson{L"[]"};
 
     platform::TrayIcon m_tray;
     recording::RecorderController m_recorder;
