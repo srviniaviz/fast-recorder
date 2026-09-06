@@ -3,6 +3,7 @@
 #include "recording/AmfProbe.h"
 #include "recording/AudioCapture.h"
 #include "recording/NvencProbe.h"
+#include "recording/QsvProbe.h"
 #include "recording/RecorderController.h"
 #include "ui/AppPage.h"
 
@@ -79,6 +80,13 @@ void testSettingsPersistence() {
             loaded.alwaysOnTop == expected.alwaysOnTop &&
             loaded.startWithWindows == expected.startWithWindows,
         L"os toggles sobrevivem ao round-trip");
+
+    expected.engine = fastrecord::recording::EncoderEngine::Qsv;
+    expect(fastrecord::saveAppSettings(expected, path),
+        L"a seleção Intel QSV pode ser gravada");
+    expect(fastrecord::loadAppSettings(path).engine ==
+            fastrecord::recording::EncoderEngine::Qsv,
+        L"a seleção Intel QSV sobrevive ao round-trip");
 
     fastrecord::AppSettings invalid = expected;
     invalid.engine = static_cast<fastrecord::recording::EncoderEngine>(99);
@@ -241,6 +249,18 @@ void testRecorderStateMachine() {
             !state.running && state.stopCalls == 1,
         L"parar finaliza e volta para Idle");
 
+    FakeBackendState qsvState;
+    EncoderEngine selectedQsv = EncoderEngine::Automatic;
+    RecorderController qsvRecorder([&](EncoderEngine engine) {
+        selectedQsv = engine;
+        return std::make_unique<FakeBackend>(qsvState);
+    });
+    qsvRecorder.setEngine(EncoderEngine::Qsv);
+    expect(qsvRecorder.start(settings).success && selectedQsv == EncoderEngine::Qsv &&
+            qsvState.lastSettings.engine == EncoderEngine::Qsv,
+        L"a seleção Intel QSV chega ao backend de gravação");
+    expect(qsvRecorder.stop().success, L"o cenário Intel QSV simulado pode ser finalizado");
+
     FakeBackendState startFailure;
     startFailure.startResult = false;
     RecorderController failedStart([&](EncoderEngine) {
@@ -301,8 +321,12 @@ void testAudioContract() {
 void testCapabilityProbes() {
     const auto nvenc = fastrecord::recording::probeNvenc();
     const auto amf = fastrecord::recording::probeAmf();
+    const auto qsv = fastrecord::recording::probeQsv();
     expect(!nvenc.description.empty(), L"a sonda NVENC sempre retorna uma descrição");
     expect(!amf.description.empty(), L"a sonda AMF sempre retorna uma descrição");
+    expect(!qsv.description.empty(), L"a sonda Intel QSV sempre retorna uma descrição");
+    expect(!qsv.h264Supported || (qsv.hardwareMftFound && qsv.deviceReady),
+        L"QSV só é anunciado quando há MFT Intel e dispositivo Intel pronto");
     expect(!nvenc.av1Supported || nvenc.encodeSessionOpened,
         L"AV1 só é anunciado pela sonda NVENC com uma sessão aberta");
     expect(!nvenc.h264Supported || nvenc.encodeSessionOpened,
@@ -327,7 +351,7 @@ void testAmfBackendFailurePath() {
 
 void testUiContract() {
     const std::wstring page(fastrecord::ui::kAppPage);
-    const std::array<const wchar_t*, 27> requiredFragments{
+    const std::array<const wchar_t*, 28> requiredFragments{
         L"id=\"record\"",
         L"id=\"pause\"",
         L"id=\"stop\"",
@@ -355,6 +379,7 @@ void testUiContract() {
         L"elapsedSeconds",
         L"AV1 · menor tamanho",
         L"120 FPS",
+        L"QSV · Intel",
     };
 
     for (const auto* fragment : requiredFragments) {

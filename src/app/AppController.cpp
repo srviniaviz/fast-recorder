@@ -143,6 +143,7 @@ bool AppController::initialize(bool startHidden) {
 
     m_nvencProbe = recording::probeNvenc();
     m_amfProbe = recording::probeAmf();
+    m_qsvProbe = recording::probeQsv();
     refreshRecordings();
 
     if (!createMainWindow() || !createTrayIcon()) {
@@ -536,6 +537,8 @@ void AppController::handleWebMessage(const std::wstring& message) {
             m_recorder.setEngine(recording::EncoderEngine::Nvenc);
         } else if (value == L"amf") {
             m_recorder.setEngine(recording::EncoderEngine::Amf);
+        } else if (value == L"qsv") {
+            m_recorder.setEngine(recording::EncoderEngine::Qsv);
         } else if (value == L"software") {
             m_recorder.setEngine(recording::EncoderEngine::Software);
         } else {
@@ -767,6 +770,7 @@ std::wstring AppController::engineValue() const {
     switch (m_recorder.engine()) {
     case recording::EncoderEngine::Nvenc: return L"nvenc";
     case recording::EncoderEngine::Amf: return L"amf";
+    case recording::EncoderEngine::Qsv: return L"qsv";
     case recording::EncoderEngine::Software: return L"software";
     default: return L"auto";
     }
@@ -792,6 +796,13 @@ std::wstring AppController::selectedEngineStatus() const {
     case recording::EncoderEngine::Amf:
         return m_amfProbe.description +
             L" A gravação atual usa o backend direto AMD AMF para H.264.";
+    case recording::EncoderEngine::Qsv:
+        if (!m_qsvProbe.h264Supported) {
+            return m_qsvProbe.description +
+                L" Selecione Automático ou Software para continuar sem QSV.";
+        }
+        return m_qsvProbe.description +
+            L" A gravação atual usa Intel Quick Sync via Media Foundation.";
     case recording::EncoderEngine::Software:
         return std::wstring(L"Compatível com qualquer GPU; utiliza a CPU para ") + codec + L".";
     default:
@@ -806,6 +817,9 @@ std::wstring AppController::selectedEngineStatus() const {
         }
         if (m_amfProbe.h264Supported) {
             return L"H.264 por hardware disponível; o Media Foundation escolherá o encoder.";
+        }
+        if (m_qsvProbe.h264Supported) {
+            return L"H.264 por hardware disponível, incluindo Intel QSV; o Media Foundation escolherá o encoder.";
         }
         if (m_amfProbe.runtimeLibraryFound) {
             return L"Runtime AMD AMF detectado; validação completa requer o SDK.";
@@ -1010,7 +1024,8 @@ void AppController::showAboutDialog() {
     const std::wstring message =
         std::wstring(L"Fast Record ") + FASTRECORD_VERSION +
         L"\n\nGravador rápido de tela para Windows.\n\n" +
-        m_nvencProbe.description + L"\n" + m_amfProbe.description;
+        m_nvencProbe.description + L"\n" + m_amfProbe.description + L"\n" +
+        m_qsvProbe.description;
     MessageBoxW(m_window, message.c_str(), L"Sobre o Fast Record", MB_OK | MB_ICONINFORMATION);
 }
 

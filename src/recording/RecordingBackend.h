@@ -13,6 +13,9 @@ enum class EncoderEngine {
     Nvenc,
     Amf,
     Software,
+    // Kept after Software so settings written by older builds keep their
+    // original numeric values.
+    Qsv,
 };
 
 enum class VideoCodec {

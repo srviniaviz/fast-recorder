@@ -78,7 +78,7 @@ AppSettings loadAppSettings(const std::wstring& registryPath) {
     }
 
     const DWORD engine = readDword(key, L"Encoder", 0);
-    if (engine <= static_cast<DWORD>(recording::EncoderEngine::Software)) {
+    if (engine <= static_cast<DWORD>(recording::EncoderEngine::Qsv)) {
         settings.engine = static_cast<recording::EncoderEngine>(engine);
     }
 

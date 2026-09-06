@@ -11,7 +11,8 @@ namespace fastrecord::recording {
 
 class MediaFoundationBackend final : public IRecordingBackend {
 public:
-    MediaFoundationBackend() = default;
+    explicit MediaFoundationBackend(bool requireQsv = false)
+        : m_requireQsv(requireQsv) {}
     ~MediaFoundationBackend() override;
 
     MediaFoundationBackend(const MediaFoundationBackend&) = delete;
@@ -35,6 +36,7 @@ private:
     std::thread m_worker;
     std::filesystem::path m_outputPath;
     std::wstring m_workerError;
+    bool m_requireQsv{false};
 };
 
 } // namespace fastrecord::recording

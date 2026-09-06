@@ -3,6 +3,7 @@
 #include "platform/TrayIcon.h"
 #include "recording/AmfProbe.h"
 #include "recording/NvencProbe.h"
+#include "recording/QsvProbe.h"
 #include "recording/RecorderController.h"
 #include "ui/WebViewHost.h"
 
@@ -106,6 +107,7 @@ private:
     recording::RecorderController m_recorder;
     recording::AmfProbeResult m_amfProbe;
     recording::NvencProbeResult m_nvencProbe;
+    recording::QsvProbeResult m_qsvProbe;
     ui::WebViewHost m_webView;
 };
 

@@ -46,6 +46,7 @@ add_executable(fast-record WIN32
     src/recording/GraphicsCapture.cpp
     src/recording/NvencBackend.cpp
     src/recording/NvencProbe.cpp
+    src/recording/QsvProbe.cpp
     src/recording/RecorderController.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc
     src/ui/WebViewHost.cpp
@@ -73,6 +74,7 @@ target_link_libraries(fast-record PRIVATE
     ${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib
     advapi32
     d3d11
+    dxgi
     windowsapp
     gdi32
     mf
@@ -94,13 +96,14 @@ add_executable(capture-smoke EXCLUDE_FROM_ALL
     src/recording/AudioCapture.cpp
     src/recording/MediaFoundationBackend.cpp
     src/recording/GraphicsCapture.cpp
+    src/recording/QsvProbe.cpp
 )
 target_include_directories(capture-smoke PRIVATE src)
 target_compile_definitions(capture-smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 if(MSVC)
     target_compile_options(capture-smoke PRIVATE /W4 /permissive- /utf-8)
 endif()
-target_link_libraries(capture-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite mfuuid ole32 user32)
+target_link_libraries(capture-smoke PRIVATE d3d11 dxgi windowsapp mf mfplat mfreadwrite mfuuid ole32 user32)
 
 # NVENC is intentionally loaded at runtime. The SDK headers are only needed
 # when compiling the optional capability probe and encoder backend.
@@ -252,6 +255,7 @@ add_executable(fast-record-tests
     src/recording/MediaFoundationBackend.cpp
     src/recording/NvencBackend.cpp
     src/recording/NvencProbe.cpp
+    src/recording/QsvProbe.cpp
     src/recording/RecorderController.cpp
 )
 target_include_directories(fast-record-tests PRIVATE
@@ -277,6 +281,7 @@ if(MSVC)
 endif()
 target_link_libraries(fast-record-tests PRIVATE
     d3d11
+    dxgi
     windowsapp
     mf
     mfplat

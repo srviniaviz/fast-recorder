@@ -16,6 +16,9 @@ std::unique_ptr<IRecordingBackend> createBackend(EncoderEngine engine) {
     if (engine == EncoderEngine::Amf) {
         return std::make_unique<AmfBackend>();
     }
+    if (engine == EncoderEngine::Qsv) {
+        return std::make_unique<MediaFoundationBackend>(true);
+    }
     return std::make_unique<MediaFoundationBackend>();
 }
 

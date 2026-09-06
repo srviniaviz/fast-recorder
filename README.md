@@ -23,6 +23,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - codificação por software ou seleção automática do Media Foundation;
 - codificação direta por NVENC quando a GPU NVIDIA compatível está disponível;
 - codificação direta por AMD AMF em H.264 quando o driver AMD oferece `amfrt64.dll`;
+- codificação por Intel Quick Sync (QSV) em H.264 quando a GPU Intel e o driver expõem o encoder;
 - microfone e áudio do PC mixados em AAC estéreo, inclusive com NVENC H.264/AV1;
 - captura de tela inteira, janela ou região selecionada;
 - histórico local com duração, data, tamanho, reprodução e acesso pelo Explorer;
@@ -50,15 +51,15 @@ A janela é nativa em C++, com a camada visual renderizada pelo WebView2. Isso m
             │
             ▼
     RecorderController
-        ┌───┴──────────────┐
-        ▼                  ▼
-   NVENC direto       AMD AMF          Media Foundation
-   MP4 / H.264/AV1    MP4 / H.264      MP4 / H.264
-        └──── WASAPI + AAC ────┘
+        ┌────┼─────────────┬──────────────┐
+        ▼    ▼             ▼              ▼
+     NVENC  AMD AMF     Intel QSV     Media Foundation
+   H.264/AV1 H.264       H.264         H.264/software
+        └──────────── WASAPI + AAC ────────────┘
 
 A captura usa Windows Graphics Capture, com redimensionamento pelo Direct3D 11. A proporção do monitor é preservada: resoluções diferentes recebem margens pretas quando necessário. O cursor é capturado pelo Windows.
 
-No modo software/automático, os frames são copiados para memória antes da codificação H.264 pelo Media Foundation. No modo NVENC, a textura D3D11 da captura vai direto para o encoder da NVIDIA e o pacote H.264 ou AV1 é muxado em MP4 localmente. No modo AMF, o frame é convertido para NV12 e enviado ao encoder AMD pelo runtime carregado em tempo de execução; a saída H.264 é entregue ao contêiner MP4 do Windows. Quando o microfone ou o áudio do PC está ativo, o WASAPI captura as fontes selecionadas, faz a mistura e adiciona uma faixa AAC estéreo de 48 kHz ao mesmo arquivo. AV1 continua reservado ao **NVENC** nesta versão; o backend AMF começa com H.264 para manter uma combinação compatível com mais gerações de GPU AMD.
+No modo software/automático, os frames são copiados para memória antes da codificação H.264 pelo Media Foundation. No modo NVENC, a textura D3D11 da captura vai direto para o encoder da NVIDIA e o pacote H.264 ou AV1 é muxado em MP4 localmente. No modo AMF, o frame é convertido para NV12 e enviado ao encoder AMD pelo runtime carregado em tempo de execução; a saída H.264 é entregue ao contêiner MP4 do Windows. No modo Intel QSV, o Media Foundation recebe um dispositivo D3D11 associado à GPU Intel e procura somente o caminho de hardware compatível com o Quick Sync. Quando o microfone ou o áudio do PC está ativo, o WASAPI captura as fontes selecionadas, faz a mistura e adiciona uma faixa AAC estéreo de 48 kHz ao mesmo arquivo. AV1 continua reservado ao **NVENC** nesta versão; AMF e QSV começam com H.264 para manter uma combinação compatível com mais gerações de GPU.
 
 Se o monitor for desconectado, sua resolução mudar ou a GPU falhar, o app tenta finalizar o MP4 e informa o erro. É necessário iniciar uma nova gravação após a mudança. Conteúdo protegido pode não aparecer; HDR ainda não tem tratamento de cor dedicado.
 
@@ -99,8 +100,8 @@ Depois de configurar e compilar o projeto, rode a suíte determinística com:
     ctest --test-dir build -C Release --output-on-failure
 
 Ela verifica as preferências salvas no Registro, os estados e erros do
-gravador, o contrato da interface, as regras do áudio e as sondas de NVENC e
-AMF. Os testes `capture-smoke` e `nvenc-smoke` continuam separados porque
+gravador, o contrato da interface, as regras do áudio e as sondas de NVENC,
+AMF e Intel QSV. Os testes `capture-smoke` e `nvenc-smoke` continuam separados porque
 precisam de uma sessão gráfica, dispositivos de áudio e, no caso do NVENC,
 uma GPU NVIDIA compatível.
 
@@ -154,12 +155,24 @@ O teste não finge uma GPU AMD. Em uma máquina sem AMD ele valida justamente o
 caminho de ausência da DLL; a codificação AMF efetiva precisa ser exercitada
 em uma máquina com uma GPU AMD compatível.
 
+### Intel Quick Sync
+
+O Fast Record procura os encoders de vídeo Intel registrados pelo driver via
+Media Foundation e enumera a GPU Intel pelo Direct3D 11. A opção **QSV · Intel**
+fica disponível no painel e exige uma GPU Intel física e um driver compatível;
+quando o hardware não existe, a gravação falha com um diagnóstico em vez de
+usar software silenciosamente.
+
+O teste unitário exercita a enumeração e o caminho de ausência. Para validar a
+gravação efetiva, selecione **QSV · Intel** em um notebook com Iris ativa no
+Gerenciador de Dispositivos, use H.264 e faça uma captura curta.
+
 ## Estrutura
 
     assets/          ícone e recursos visuais
     src/app/         ciclo de vida, janela e preferências
     src/platform/    integração com a bandeja do Windows
-    src/recording/   estado do gravador e sondas NVENC/AMF
+    src/recording/   estado do gravador e sondas NVENC/AMF/QSV
     src/resources/   recursos compilados no executável
     src/ui/          WebView2 e interface do painel
 
@@ -171,6 +184,7 @@ em uma máquina com uma GPU AMD compatível.
 - [x] conectar NVENC ao fluxo de frames;
 - [x] adicionar escolha de codec H.264/AV1 ao NVENC;
 - [x] conectar AMD AMF H.264 ao fluxo de frames;
+- [x] conectar Intel Quick Sync H.264 via Media Foundation;
 - [ ] adicionar AV1 ao backend AMD AMF;
 - [x] implementar captura de janela e região;
 - [x] listar e reproduzir gravações recentes;

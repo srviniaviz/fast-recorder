@@ -1,6 +1,7 @@
 #include "recording/MediaFoundationBackend.h"
 #include "recording/AudioCapture.h"
 #include "recording/GraphicsCapture.h"
+#include "recording/QsvProbe.h"
 
 #include <Windows.h>
 #include <mfapi.h>
@@ -286,12 +287,25 @@ void MediaFoundationBackend::recordLoop(
         audioCapture = std::make_unique<AudioCapture>();
     }
 
+    QsvDeviceManager qsvDevice;
+    if (m_requireQsv) {
+        std::wstring qsvError;
+        if (!createQsvDeviceManager(qsvDevice, qsvError)) {
+            reportStartup(qsvError);
+            capture.reset();
+            return;
+        }
+    }
+
     ComPtr<IMFAttributes> attributes;
     HRESULT result = MFCreateAttributes(&attributes, 2);
     if (SUCCEEDED(result)) {
         result = attributes->SetUINT32(
             MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
             settings.engine == EncoderEngine::Software ? FALSE : TRUE);
+    }
+    if (SUCCEEDED(result) && m_requireQsv) {
+        result = attributes->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, qsvDevice.manager.Get());
     }
     if (SUCCEEDED(result)) {
         result = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
@@ -371,7 +385,11 @@ void MediaFoundationBackend::recordLoop(
     }
 
     if (FAILED(result)) {
-        reportStartup(hresultMessage(L"Não foi possível iniciar o encoder H.264", result));
+        reportStartup(hresultMessage(
+            m_requireQsv
+                ? L"Não foi possível iniciar o encoder Intel QSV H.264"
+                : L"Não foi possível iniciar o encoder H.264",
+            result));
         writer.Reset();
         inputType.Reset();
         outputType.Reset();
