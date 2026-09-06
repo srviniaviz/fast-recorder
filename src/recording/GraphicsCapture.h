@@ -37,6 +37,7 @@ private:
     winrt::Windows::Graphics::SizeInt32 m_size{};
     UINT m_width{}, m_height{};
     HMONITOR m_monitor{};
+    bool m_monitorSource{true};
 };
 
 } // namespace fastrecord::recording

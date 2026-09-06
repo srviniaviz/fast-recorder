@@ -2,6 +2,7 @@
 
 #include "app/AppSettings.h"
 #include "BuildVersion.h"
+#include "platform/CaptureSelector.h"
 #include "resources/resource.h"
 
 #include "ui/AppPage.h"
@@ -560,13 +561,6 @@ void AppController::persistSettings() {
 }
 
 void AppController::startRecording() {
-    if (m_area != L"monitor") {
-        m_status = L"A seleção de janela e região entra na próxima etapa; escolha Monitor inteiro.";
-        m_tray.showBalloon(L"Fast Record", m_status, NIIF_WARNING);
-        syncInterface();
-        return;
-    }
-
     unsigned int width = 1920;
     unsigned int height = 1080;
     if (swscanf_s(m_resolution.c_str(), L"%ux%u", &width, &height) != 2) {
@@ -574,12 +568,34 @@ void AppController::startRecording() {
         height = 1080;
     }
 
+    recording::RecordingSettings settings;
     POINT cursor{};
     GetCursorPos(&cursor);
-
-    recording::RecordingSettings settings;
-    settings.target.kind = recording::CaptureTargetKind::CurrentMonitor;
     settings.target.monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+
+    if (m_area == L"window") {
+        const HWND selectedWindow = platform::chooseCaptureWindow(m_window, m_window);
+        if (selectedWindow == nullptr) {
+            m_status = L"Seleção de janela cancelada.";
+            syncInterface();
+            return;
+        }
+        settings.target.kind = recording::CaptureTargetKind::SelectedWindow;
+        settings.target.window = selectedWindow;
+        settings.target.monitor = MonitorFromWindow(selectedWindow, MONITOR_DEFAULTTONEAREST);
+    } else if (m_area == L"region") {
+        RECT selectedRegion{};
+        if (!platform::chooseCaptureRegion(m_window, settings.target.monitor, selectedRegion)) {
+            m_status = L"Seleção de região cancelada.";
+            syncInterface();
+            return;
+        }
+        settings.target.kind = recording::CaptureTargetKind::SelectedRegion;
+        settings.captureRegion = selectedRegion;
+    } else {
+        settings.target.kind = recording::CaptureTargetKind::CurrentMonitor;
+    }
+
     settings.outputDirectory = recordingsDirectory();
     settings.width = width;
     settings.height = height;

@@ -81,8 +81,7 @@ bool MediaFoundationBackend::start(const RecordingSettings& settings, std::wstri
         settings.width > 3840 || settings.height > 2160 ||
         (settings.width % 2) != 0 || (settings.height % 2) != 0 ||
         settings.framesPerSecond == 0 || settings.framesPerSecond > 120 ||
-        settings.bitrateMbps < 4 || settings.bitrateMbps > 80 ||
-        settings.target.kind == CaptureTargetKind::SelectedWindow) {
+        settings.bitrateMbps < 4 || settings.bitrateMbps > 80) {
         error = L"As configurações da gravação são inválidas.";
         return false;
     }

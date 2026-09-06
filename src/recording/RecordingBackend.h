@@ -24,6 +24,7 @@ enum class CaptureTargetKind {
     CurrentMonitor,
     SelectedMonitor,
     SelectedWindow,
+    SelectedRegion,
 };
 
 struct CaptureTarget {
@@ -39,6 +40,8 @@ struct RecordingSettings {
     std::uint32_t height{1080};
     std::uint32_t framesPerSecond{30};
     std::uint32_t bitrateMbps{20};
+    // Desktop coordinates used when target.kind is SelectedRegion.
+    RECT captureRegion{};
     EncoderEngine engine{EncoderEngine::Automatic};
     VideoCodec codec{VideoCodec::H264};
     bool captureCursor{true};

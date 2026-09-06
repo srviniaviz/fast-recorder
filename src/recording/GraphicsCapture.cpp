@@ -28,7 +28,17 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings)
     const HMONITOR monitor = settings.target.monitor ? settings.target.monitor
         : MonitorFromPoint(POINT{}, MONITOR_DEFAULTTOPRIMARY);
     m_monitor = monitor;
-    check_hresult(factory->CreateForMonitor(monitor, guid_of<GraphicsCaptureItem>(), put_abi(m_item)));
+    m_monitorSource = settings.target.kind != CaptureTargetKind::SelectedWindow;
+    if (settings.target.kind == CaptureTargetKind::SelectedWindow) {
+        if (settings.target.window == nullptr || !IsWindow(settings.target.window) ||
+            !IsWindowVisible(settings.target.window)) {
+            throw hresult_error(E_INVALIDARG, L"A janela selecionada não está mais disponível.");
+        }
+        check_hresult(factory->CreateForWindow(
+            settings.target.window, guid_of<GraphicsCaptureItem>(), put_abi(m_item)));
+    } else {
+        check_hresult(factory->CreateForMonitor(monitor, guid_of<GraphicsCaptureItem>(), put_abi(m_item)));
+    }
     m_size = m_item.Size();
     if (m_size.Width <= 0 || m_size.Height <= 0) {
         throw hresult_error(E_INVALIDARG, L"O monitor não possui uma área válida de captura.");
@@ -71,7 +81,21 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings)
     const LONG fitHeight = static_cast<LONG>(m_size.Height * scale);
     const LONG left = (static_cast<LONG>(m_width) - fitWidth) / 2;
     const LONG top = (static_cast<LONG>(m_height) - fitHeight) / 2;
-    const RECT source{0, 0, m_size.Width, m_size.Height};
+    RECT source{0, 0, m_size.Width, m_size.Height};
+    if (settings.target.kind == CaptureTargetKind::SelectedRegion) {
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (!GetMonitorInfoW(m_monitor, &monitorInfo)) {
+            throw hresult_error(E_INVALIDARG, L"Não foi possível identificar o monitor da região.");
+        }
+        source.left = std::max<LONG>(0, settings.captureRegion.left - monitorInfo.rcMonitor.left);
+        source.top = std::max<LONG>(0, settings.captureRegion.top - monitorInfo.rcMonitor.top);
+        source.right = std::min<LONG>(m_size.Width, settings.captureRegion.right - monitorInfo.rcMonitor.left);
+        source.bottom = std::min<LONG>(m_size.Height, settings.captureRegion.bottom - monitorInfo.rcMonitor.top);
+        if (source.right - source.left < 2 || source.bottom - source.top < 2) {
+            throw hresult_error(E_INVALIDARG, L"A região selecionada é pequena demais.");
+        }
+    }
     const RECT destination{left, top, left + fitWidth, top + fitHeight};
     const RECT target{0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height)};
     D3D11_VIDEO_COLOR black{};
@@ -107,9 +131,9 @@ bool GraphicsCapture::update() {
     check_hresult(m_device->GetDeviceRemovedReason());
     MONITORINFO info{};
     info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(m_monitor, &info) ||
+    if (m_monitorSource && (!GetMonitorInfoW(m_monitor, &info) ||
         info.rcMonitor.right - info.rcMonitor.left != m_size.Width ||
-        info.rcMonitor.bottom - info.rcMonitor.top != m_size.Height) {
+        info.rcMonitor.bottom - info.rcMonitor.top != m_size.Height)) {
         throw hresult_error(E_ABORT, L"O monitor foi desconectado ou teve sua resolução alterada.");
     }
     // Drain only the bounded pool. A static desktop can legitimately produce no frames.

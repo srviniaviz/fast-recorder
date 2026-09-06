@@ -36,6 +36,7 @@ add_executable(fast-record WIN32
     src/main.cpp
     src/app/AppController.cpp
     src/app/AppSettings.cpp
+    src/platform/CaptureSelector.cpp
     src/platform/TrayIcon.cpp
     src/recording/AmfProbe.cpp
     src/recording/MediaFoundationBackend.cpp
