@@ -126,10 +126,10 @@ bool AppController::initialize() {
         return false;
     }
 
-    if (!registerHotkey()) {
+    if (!registerHotkeys()) {
         m_tray.showBalloon(
             L"Fast Record",
-            L"Ctrl+Shift+R já está em uso. Os botões da janela continuam disponíveis.",
+            L"Um ou mais atalhos globais já estão em uso. Os botões da janela continuam disponíveis.",
             NIIF_WARNING);
     }
 
@@ -191,7 +191,7 @@ void AppController::shutdown() {
 
     persistSettings();
 
-    unregisterHotkey();
+    unregisterHotkeys();
     m_tray.destroy();
     m_webView.close();
 
@@ -265,20 +265,40 @@ bool AppController::createTrayIcon() {
         [this](LPARAM event) { handleTrayEvent(event); });
 }
 
-bool AppController::registerHotkey() {
-    m_hotkeyRegistered = RegisterHotKey(
+bool AppController::registerHotkeys() {
+    m_recordHotkeyRegistered = RegisterHotKey(
         m_window,
-        kHotkeyId,
+        kRecordHotkeyId,
         MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
         'R') == TRUE;
-    return m_hotkeyRegistered;
+    m_pauseHotkeyRegistered = RegisterHotKey(
+        m_window,
+        kPauseHotkeyId,
+        MOD_CONTROL | MOD_NOREPEAT,
+        'P') == TRUE;
+    m_stopHotkeyRegistered = RegisterHotKey(
+        m_window,
+        kStopHotkeyId,
+        MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+        'S') == TRUE;
+    return m_recordHotkeyRegistered && m_pauseHotkeyRegistered && m_stopHotkeyRegistered;
 }
 
-void AppController::unregisterHotkey() {
-    if (m_hotkeyRegistered && m_window != nullptr) {
-        UnregisterHotKey(m_window, kHotkeyId);
+void AppController::unregisterHotkeys() {
+    if (m_window != nullptr) {
+        if (m_recordHotkeyRegistered) {
+            UnregisterHotKey(m_window, kRecordHotkeyId);
+        }
+        if (m_pauseHotkeyRegistered) {
+            UnregisterHotKey(m_window, kPauseHotkeyId);
+        }
+        if (m_stopHotkeyRegistered) {
+            UnregisterHotKey(m_window, kStopHotkeyId);
+        }
     }
-    m_hotkeyRegistered = false;
+    m_recordHotkeyRegistered = false;
+    m_pauseHotkeyRegistered = false;
+    m_stopHotkeyRegistered = false;
 }
 
 void AppController::dockWindowToBottom() {
@@ -514,8 +534,40 @@ void AppController::persistSettings() {
 }
 
 void AppController::startRecording() {
-    const auto result = m_recorder.start();
+    if (m_area != L"monitor") {
+        m_status = L"A seleção de janela e região entra na próxima etapa; escolha Monitor inteiro.";
+        m_tray.showBalloon(L"Fast Record", m_status, NIIF_WARNING);
+        syncInterface();
+        return;
+    }
+
+    unsigned int width = 1920;
+    unsigned int height = 1080;
+    if (swscanf_s(m_resolution.c_str(), L"%ux%u", &width, &height) != 2) {
+        width = 1920;
+        height = 1080;
+    }
+
+    POINT cursor{};
+    GetCursorPos(&cursor);
+
+    recording::RecordingSettings settings;
+    settings.target.kind = recording::CaptureTargetKind::CurrentMonitor;
+    settings.target.monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    settings.outputDirectory = recordingsDirectory();
+    settings.width = width;
+    settings.height = height;
+    settings.framesPerSecond = 30;
+    settings.bitrateMbps = static_cast<std::uint32_t>(m_bitrateMbps);
+    settings.captureCursor = true;
+    settings.captureSystemAudio = false;
+    settings.captureMicrophone = false;
+
+    const auto result = m_recorder.start(settings);
     m_status = result.message;
+    if (result.success && m_microphoneEnabled) {
+        m_status = L"Gravando vídeo; o microfone será conectado na próxima etapa.";
+    }
     if (!result.success) {
         m_tray.showBalloon(L"Fast Record", result.message, NIIF_WARNING);
     }
@@ -533,7 +585,10 @@ void AppController::togglePause() {
 
 void AppController::stopRecording() {
     const auto result = m_recorder.stop();
-    m_status = result.message;
+    const auto output = m_recorder.outputPath();
+    m_status = result.success && !output.empty()
+        ? L"Vídeo salvo em " + output.filename().wstring()
+        : result.message;
     m_tray.showBalloon(
         L"Fast Record",
         result.message,
@@ -571,17 +626,19 @@ std::wstring AppController::engineValue() const {
 std::wstring AppController::selectedEngineStatus() const {
     switch (m_recorder.engine()) {
     case recording::EncoderEngine::Nvenc:
-        return m_nvencProbe.description;
+        return m_nvencProbe.description +
+            L" A gravação atual usa a seleção de hardware do Media Foundation.";
     case recording::EncoderEngine::Amf:
-        return m_amfProbe.description;
+        return m_amfProbe.description +
+            L" A gravação atual usa a seleção de hardware do Media Foundation.";
     case recording::EncoderEngine::Software:
         return L"Compatível com qualquer GPU; utiliza a CPU.";
     default:
         if (m_nvencProbe.h264Supported) {
-            return L"Automático selecionará NVENC para H.264.";
+            return L"H.264 por hardware disponível; o Media Foundation escolherá o encoder.";
         }
         if (m_amfProbe.h264Supported) {
-            return L"Automático selecionará AMD AMF para H.264.";
+            return L"H.264 por hardware disponível; o Media Foundation escolherá o encoder.";
         }
         if (m_amfProbe.runtimeLibraryFound) {
             return L"Runtime AMD AMF detectado; validação completa requer o SDK.";
@@ -693,8 +750,12 @@ LRESULT AppController::handleMessage(
         dockWindowToBottom();
         return 0;
     case WM_HOTKEY:
-        if (wParam == kHotkeyId) {
+        if (wParam == kRecordHotkeyId) {
             toggleRecording();
+        } else if (wParam == kPauseHotkeyId && m_recorder.isRecording()) {
+            togglePause();
+        } else if (wParam == kStopHotkeyId && m_recorder.isRecording()) {
+            stopRecording();
         }
         return 0;
     case WM_COMMAND:

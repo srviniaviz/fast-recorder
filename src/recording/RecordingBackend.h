@@ -8,6 +8,13 @@
 
 namespace fastrecord::recording {
 
+enum class EncoderEngine {
+    Automatic,
+    Nvenc,
+    Amf,
+    Software,
+};
+
 enum class CaptureTargetKind {
     CurrentMonitor,
     SelectedMonitor,
@@ -26,6 +33,8 @@ struct RecordingSettings {
     std::uint32_t width{1920};
     std::uint32_t height{1080};
     std::uint32_t framesPerSecond{30};
+    std::uint32_t bitrateMbps{20};
+    EncoderEngine engine{EncoderEngine::Automatic};
     bool captureCursor{true};
     bool captureSystemAudio{true};
     bool captureMicrophone{false};
@@ -36,8 +45,10 @@ public:
     virtual ~IRecordingBackend() = default;
 
     virtual bool start(const RecordingSettings& settings, std::wstring& error) = 0;
+    virtual bool pause(std::wstring& error) = 0;
+    virtual bool resume(std::wstring& error) = 0;
     virtual bool stop(std::wstring& error) = 0;
+    virtual std::filesystem::path outputPath() const = 0;
 };
 
 } // namespace fastrecord::recording
-

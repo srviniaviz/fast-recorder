@@ -38,6 +38,7 @@ add_executable(fast-record WIN32
     src/app/AppSettings.cpp
     src/platform/TrayIcon.cpp
     src/recording/AmfProbe.cpp
+    src/recording/MediaFoundationBackend.cpp
     src/recording/NvencProbe.cpp
     src/recording/RecorderController.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc
@@ -67,6 +68,10 @@ target_link_libraries(fast-record PRIVATE
     advapi32
     d3d11
     gdi32
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
     ole32
     oleaut32
     shell32

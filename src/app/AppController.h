@@ -26,7 +26,9 @@ public:
     void shutdown();
 
 private:
-    static constexpr int kHotkeyId = 1;
+    static constexpr int kRecordHotkeyId = 1;
+    static constexpr int kPauseHotkeyId = 2;
+    static constexpr int kStopHotkeyId = 3;
     static constexpr UINT kShowWindowMessage = WM_APP + 20;
     static constexpr int kWindowWidth = 460;
     static constexpr int kWindowHeight = 570;
@@ -45,8 +47,8 @@ private:
 
     bool createMainWindow();
     bool createTrayIcon();
-    bool registerHotkey();
-    void unregisterHotkey();
+    bool registerHotkeys();
+    void unregisterHotkeys();
     void dockWindowToBottom();
     void showMainWindow();
     void handleTrayEvent(LPARAM event);
@@ -74,7 +76,9 @@ private:
     HICON m_icon{nullptr};
     HANDLE m_singleInstanceMutex{nullptr};
     bool m_comInitialized{false};
-    bool m_hotkeyRegistered{false};
+    bool m_recordHotkeyRegistered{false};
+    bool m_pauseHotkeyRegistered{false};
+    bool m_stopHotkeyRegistered{false};
     bool m_shutdownStarted{false};
     bool m_settingsLoaded{false};
     bool m_webViewReady{false};

@@ -1,17 +1,31 @@
 #include "recording/RecorderController.h"
+#include "recording/MediaFoundationBackend.h"
+
+#include <utility>
 
 namespace fastrecord::recording {
 
-OperationResult RecorderController::start() {
+RecorderController::RecorderController()
+    : m_backend(std::make_unique<MediaFoundationBackend>()) {}
+
+RecorderController::~RecorderController() = default;
+
+OperationResult RecorderController::start(const RecordingSettings& settings) {
     if (m_state == RecorderState::Recording || m_state == RecorderState::Starting) {
         return {false, L"Já existe uma gravação em andamento."};
     }
 
-    // This is deliberately explicit until the Windows Graphics Capture and
-    // Media Foundation pipeline is connected. The shell is already usable,
-    // but it must not pretend to have created a video file.
-    m_lastError = L"O backend de captura ainda não foi conectado.";
-    return {false, m_lastError};
+    m_state = RecorderState::Starting;
+    RecordingSettings effectiveSettings = settings;
+    effectiveSettings.engine = m_engine;
+    if (!m_backend->start(effectiveSettings, m_lastError)) {
+        m_state = RecorderState::Idle;
+        return {false, m_lastError};
+    }
+
+    m_lastError.clear();
+    m_state = RecorderState::Recording;
+    return {true, L"Gravação iniciada."};
 }
 
 OperationResult RecorderController::pause() {
@@ -19,6 +33,9 @@ OperationResult RecorderController::pause() {
         return {false, L"Não há uma gravação ativa para pausar."};
     }
 
+    if (!m_backend->pause(m_lastError)) {
+        return {false, m_lastError};
+    }
     m_state = RecorderState::Paused;
     return {true, L"Gravação pausada."};
 }
@@ -28,6 +45,9 @@ OperationResult RecorderController::resume() {
         return {false, L"A gravação não está pausada."};
     }
 
+    if (!m_backend->resume(m_lastError)) {
+        return {false, m_lastError};
+    }
     m_state = RecorderState::Recording;
     return {true, L"Gravação retomada."};
 }
@@ -38,8 +58,16 @@ OperationResult RecorderController::stop() {
     }
 
     m_state = RecorderState::Stopping;
+    if (!m_backend->stop(m_lastError)) {
+        m_state = RecorderState::Idle;
+        return {false, m_lastError};
+    }
     m_state = RecorderState::Idle;
     return {true, L"Gravação finalizada."};
+}
+
+std::filesystem::path RecorderController::outputPath() const {
+    return m_backend->outputPath();
 }
 
 } // namespace fastrecord::recording

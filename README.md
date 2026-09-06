@@ -11,20 +11,22 @@
 O Fast Record vive na bandeja do sistema e abre um painel compacto quando você precisa dele. A ideia é simples: escolher a fonte, ajustar a qualidade e começar a captura sem atravessar assistentes ou telas desnecessárias.
 
 > [!IMPORTANT]
-> O projeto está em desenvolvimento. A interface, as preferências e a detecção dos encoders já funcionam; o pipeline que captura e grava o vídeo ainda não está conectado.
+> O projeto está em desenvolvimento. A captura do monitor em MP4 já funciona; áudio, captura de janela/região e os backends diretos NVENC/AMF ainda estão em implementação.
 
 ## O que já está pronto
 
 - painel flutuante com acesso pela bandeja do Windows;
-- atalho global **Ctrl + Shift + R**;
+- atalhos globais para gravar, pausar e parar;
 - controles de gravar, pausar e parar;
-- seleção de tela inteira, janela ou região;
+- captura do monitor atual em MP4/H.264;
 - escolha entre NVENC, AMD AMF e codificação por software;
 - resolução configurável de 720p a 4K;
 - bitrate ajustável entre 4 e 80 Mbps;
 - preferências restauradas depois de fechar e abrir o aplicativo;
 - detecção em tempo de execução dos drivers NVENC e AMF;
 - instância única: abrir o executável novamente traz o painel existente para frente.
+
+Atalhos: **Ctrl + Shift + R** inicia ou encerra a gravação, **Ctrl + P** pausa ou continua e **Ctrl + Shift + S** encerra e salva o arquivo.
 
 As preferências ficam em **HKEY_CURRENT_USER\Software\Fast Record**. Nenhuma configuração é enviada para fora do computador.
 
@@ -42,11 +44,10 @@ A janela é nativa em C++, com a camada visual renderizada pelo WebView2. Isso m
             ▼
     RecorderController
             │
-            ├── NVENC  · NVIDIA
-            ├── AMF    · AMD
-            └── Software / Media Foundation
+            ▼
+    Media Foundation ── MP4 / H.264
 
-O plano para a captura é usar Windows Graphics Capture e WASAPI, compartilhar as superfícies pelo Direct3D 11 e entregar os frames diretamente ao encoder selecionado.
+O primeiro backend captura o monitor atual, redimensiona os frames para a resolução escolhida e grava H.264 pelo Media Foundation. A próxima evolução troca a captura por Windows Graphics Capture com Direct3D 11 e conecta os frames diretamente ao NVENC ou AMD AMF, mantendo o Media Foundation como fallback.
 
 ## Compilando
 
@@ -77,8 +78,8 @@ commit publicado recebe uma tag própria e não sobrescreve uma versão anterior
 
 Cada release publicado no GitHub contém:
 
-- `FastRecord-v0.1.<build>-x64-Setup.exe`, instalador por usuário;
-- `FastRecord-v0.1.<build>-x64.zip`, versão portátil.
+- `FastRecord-0.1.<build>-x64-Setup.exe`, instalador por usuário;
+- `FastRecord-0.1.<build>-x64.zip`, versão portátil.
 
 O instalador cria atalhos no Menu Iniciar e na área de trabalho, registra o
 desinstalador e não precisa de privilégios de administrador. O Microsoft Edge
@@ -105,13 +106,13 @@ Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibli
 
 ## Próximos passos
 
-- [ ] capturar o desktop com Windows Graphics Capture;
+- [x] gravar o monitor atual em MP4/H.264;
+- [ ] migrar a captura para Windows Graphics Capture e Direct3D 11;
 - [ ] capturar microfone e áudio do sistema com WASAPI;
 - [ ] conectar NVENC e AMD AMF ao fluxo de frames;
-- [ ] multiplexar vídeo e áudio em MP4;
 - [ ] implementar captura de janela e região;
 - [ ] listar e reproduzir gravações recentes;
-- [ ] empacotar uma versão instalável.
+- [x] empacotar versões automaticamente pelo GitHub Actions.
 
 ## Licença
 

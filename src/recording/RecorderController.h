@@ -2,16 +2,11 @@
 
 #include "recording/RecordingBackend.h"
 
+#include <filesystem>
+#include <memory>
 #include <string>
 
 namespace fastrecord::recording {
-
-enum class EncoderEngine {
-    Automatic,
-    Nvenc,
-    Amf,
-    Software,
-};
 
 enum class RecorderState {
     Idle,
@@ -28,7 +23,13 @@ struct OperationResult {
 
 class RecorderController final {
 public:
-    OperationResult start();
+    RecorderController();
+    ~RecorderController();
+
+    RecorderController(const RecorderController&) = delete;
+    RecorderController& operator=(const RecorderController&) = delete;
+
+    OperationResult start(const RecordingSettings& settings);
     OperationResult pause();
     OperationResult resume();
     OperationResult stop();
@@ -42,11 +43,13 @@ public:
 
     void setEngine(EncoderEngine engine) noexcept { m_engine = engine; }
     EncoderEngine engine() const noexcept { return m_engine; }
+    std::filesystem::path outputPath() const;
 
 private:
     RecorderState m_state{RecorderState::Idle};
     EncoderEngine m_engine{EncoderEngine::Automatic};
     std::wstring m_lastError;
+    std::unique_ptr<IRecordingBackend> m_backend;
 };
 
 } // namespace fastrecord::recording
