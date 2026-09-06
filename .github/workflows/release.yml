@@ -60,7 +60,11 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item build-ci\Release\fast-record.exe "dist\FastRecord-$env:APP_VERSION-x64.exe"
           Compress-Archive -Path build-ci\Release\fast-record.exe -DestinationPath "dist\FastRecord-$env:APP_VERSION-x64.zip"
-          & makensis.exe "/DAPP_VERSION=$env:APP_VERSION" installer\FastRecord.nsi
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path -LiteralPath $makensis)) {
+            throw "NSIS não encontrado em $makensis"
+          }
+          & $makensis "/DAPP_VERSION=$env:APP_VERSION" installer\FastRecord.nsi
 
       - name: Create release tag
         shell: pwsh
@@ -91,4 +95,3 @@ jobs:
           } else {
             gh release create $env:RELEASE_TAG $setup $portable --title "Fast Record $env:RELEASE_TAG" --generate-notes --latest
           }
-
