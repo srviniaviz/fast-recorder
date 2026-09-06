@@ -122,7 +122,10 @@ bool AppController::initialize(bool startHidden) {
     m_startWithWindows = savedSettings.startWithWindows;
     m_settingsLoaded = true;
 
-    if (m_startWithWindows) {
+    if (m_startWithWindows && !platform::isStartWithWindowsEnabled()) {
+        m_startWithWindows = false;
+        persistSettings();
+    } else if (m_startWithWindows) {
         std::wstring startupError;
         if (!platform::setStartWithWindows(true, startupError)) {
             m_startWithWindows = false;

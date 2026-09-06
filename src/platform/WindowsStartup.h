@@ -8,4 +8,7 @@ namespace fastrecord::platform {
 // This uses HKCU, so enabling it never requires administrator privileges.
 bool setStartWithWindows(bool enabled, std::wstring& error);
 
+// Reads the same Run/StartupApproved state used by Windows startup settings.
+bool isStartWithWindowsEnabled();
+
 } // namespace fastrecord::platform
