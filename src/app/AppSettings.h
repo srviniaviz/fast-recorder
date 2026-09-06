@@ -16,6 +16,7 @@ struct AppSettings {
     bool microphoneEnabled{true};
     bool systemAudioEnabled{true};
     bool alwaysOnTop{false};
+    bool startWithWindows{false};
 };
 
 // The optional registry path keeps the production key stable while allowing

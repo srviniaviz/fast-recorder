@@ -29,6 +29,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - resolução configurável de 720p a 4K;
 - bitrate ajustável entre 4 e 80 Mbps;
 - preferências restauradas depois de fechar e abrir o aplicativo;
+- opção para iniciar automaticamente com o Windows, já minimizado na bandeja;
 - detecção em tempo de execução dos drivers NVENC e AMF;
 - instância única: abrir o executável novamente traz o painel existente para frente.
 

@@ -109,6 +109,7 @@ AppSettings loadAppSettings(const std::wstring& registryPath) {
     settings.microphoneEnabled = readDword(key, L"MicrophoneEnabled", 1) != 0;
     settings.systemAudioEnabled = readDword(key, L"SystemAudioEnabled", 1) != 0;
     settings.alwaysOnTop = readDword(key, L"AlwaysOnTop", 0) != 0;
+    settings.startWithWindows = readDword(key, L"StartWithWindows", 0) != 0;
 
     RegCloseKey(key);
     return settings;
@@ -139,7 +140,8 @@ bool saveAppSettings(const AppSettings& settings, const std::wstring& registryPa
         writeDword(key, L"BitrateMbps", static_cast<DWORD>(std::clamp(settings.bitrateMbps, 4, 80))) &&
         writeDword(key, L"MicrophoneEnabled", settings.microphoneEnabled ? 1u : 0u) &&
         writeDword(key, L"SystemAudioEnabled", settings.systemAudioEnabled ? 1u : 0u) &&
-        writeDword(key, L"AlwaysOnTop", settings.alwaysOnTop ? 1u : 0u);
+        writeDword(key, L"AlwaysOnTop", settings.alwaysOnTop ? 1u : 0u) &&
+        writeDword(key, L"StartWithWindows", settings.startWithWindows ? 1u : 0u);
 
     RegCloseKey(key);
     return saved;

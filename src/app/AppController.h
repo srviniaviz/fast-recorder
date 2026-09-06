@@ -23,7 +23,7 @@ public:
     AppController(const AppController&) = delete;
     AppController& operator=(const AppController&) = delete;
 
-    bool initialize();
+    bool initialize(bool startHidden = false);
     int run();
     void shutdown();
 
@@ -90,6 +90,7 @@ private:
     bool m_microphoneEnabled{true};
     bool m_systemAudioEnabled{true};
     bool m_alwaysOnTop{false};
+    bool m_startWithWindows{false};
     int m_framesPerSecond{30};
     int m_bitrateMbps{20};
     recording::VideoCodec m_codec{recording::VideoCodec::H264};

@@ -48,8 +48,9 @@ void testSettingsPersistence() {
         L"as configurações ausentes usam captura do monitor em 1080p");
     expect(defaults.framesPerSecond == 30 && defaults.bitrateMbps == 20,
         L"as configurações ausentes usam 30 FPS e 20 Mbps");
-    expect(defaults.microphoneEnabled && defaults.systemAudioEnabled && !defaults.alwaysOnTop,
-        L"as configurações ausentes usam áudio ligado e janela sem pin");
+    expect(defaults.microphoneEnabled && defaults.systemAudioEnabled &&
+            !defaults.alwaysOnTop && !defaults.startWithWindows,
+        L"as configurações ausentes usam áudio ligado, janela sem pin e sem inicialização automática");
 
     fastrecord::AppSettings expected;
     expected.engine = fastrecord::recording::EncoderEngine::Amf;
@@ -61,6 +62,7 @@ void testSettingsPersistence() {
     expected.microphoneEnabled = false;
     expected.systemAudioEnabled = false;
     expected.alwaysOnTop = true;
+    expected.startWithWindows = true;
 
     expect(fastrecord::saveAppSettings(expected, path),
         L"as configurações são gravadas no registro");
@@ -74,7 +76,8 @@ void testSettingsPersistence() {
         L"FPS e bitrate sobrevivem ao round-trip");
     expect(loaded.microphoneEnabled == expected.microphoneEnabled &&
             loaded.systemAudioEnabled == expected.systemAudioEnabled &&
-            loaded.alwaysOnTop == expected.alwaysOnTop,
+            loaded.alwaysOnTop == expected.alwaysOnTop &&
+            loaded.startWithWindows == expected.startWithWindows,
         L"os toggles sobrevivem ao round-trip");
 
     fastrecord::AppSettings invalid = expected;
@@ -324,7 +327,7 @@ void testAmfBackendFailurePath() {
 
 void testUiContract() {
     const std::wstring page(fastrecord::ui::kAppPage);
-    const std::array<const wchar_t*, 25> requiredFragments{
+    const std::array<const wchar_t*, 27> requiredFragments{
         L"id=\"record\"",
         L"id=\"pause\"",
         L"id=\"stop\"",
@@ -336,6 +339,7 @@ void testUiContract() {
         L"id=\"resolutionSelect\"",
         L"id=\"fpsSelect\"",
         L"id=\"bitrate\"",
+        L"id=\"startWithWindows\"",
         L"data-tab=\"files\"",
         L"data-tab=\"actions\"",
         L"data-tab=\"settings\"",
@@ -344,6 +348,7 @@ void testUiContract() {
         L"send('stop')",
         L"send('toggle-mic')",
         L"send('toggle-system-audio')",
+        L"send('toggle-start-with-windows')",
         L"send('refresh-recordings')",
         L"open-recording:",
         L"show-recording:",

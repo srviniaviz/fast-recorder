@@ -3,6 +3,7 @@
 #include "app/AppSettings.h"
 #include "BuildVersion.h"
 #include "platform/CaptureSelector.h"
+#include "platform/WindowsStartup.h"
 #include "resources/resource.h"
 
 #include "ui/AppPage.h"
@@ -65,7 +66,7 @@ AppController::~AppController() {
     shutdown();
 }
 
-bool AppController::initialize() {
+bool AppController::initialize(bool startHidden) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     SetLastError(ERROR_SUCCESS);
@@ -118,7 +119,17 @@ bool AppController::initialize() {
     m_microphoneEnabled = savedSettings.microphoneEnabled;
     m_systemAudioEnabled = savedSettings.systemAudioEnabled;
     m_alwaysOnTop = savedSettings.alwaysOnTop;
+    m_startWithWindows = savedSettings.startWithWindows;
     m_settingsLoaded = true;
+
+    if (m_startWithWindows) {
+        std::wstring startupError;
+        if (!platform::setStartWithWindows(true, startupError)) {
+            m_startWithWindows = false;
+            m_status = startupError;
+            persistSettings();
+        }
+    }
 
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     m_comInitialized = SUCCEEDED(comResult);
@@ -169,7 +180,9 @@ bool AppController::initialize() {
         return false;
     }
 
-    showMainWindow();
+    if (!startHidden) {
+        showMainWindow();
+    }
     SetTimer(m_window, 1, 250, nullptr);
     return true;
 }
@@ -458,6 +471,17 @@ void AppController::handleWebMessage(const std::wstring& message) {
         m_systemAudioEnabled = !m_systemAudioEnabled;
         persistSettings();
         syncInterface();
+    } else if (message == L"toggle-start-with-windows") {
+        const bool enabled = !m_startWithWindows;
+        std::wstring startupError;
+        if (platform::setStartWithWindows(enabled, startupError)) {
+            m_startWithWindows = enabled;
+            persistSettings();
+        } else {
+            m_status = startupError;
+            m_tray.showBalloon(L"Fast Record", startupError, NIIF_ERROR);
+        }
+        syncInterface();
     } else if (message == L"open-folder") {
         openRecordingsFolder();
     } else if (message == L"refresh-recordings") {
@@ -574,6 +598,7 @@ void AppController::syncInterface() {
         L",microphone:" + std::wstring(jsonBoolean(m_microphoneEnabled)) +
         L",systemAudio:" + std::wstring(jsonBoolean(m_systemAudioEnabled)) +
         L",pinned:" + std::wstring(jsonBoolean(m_alwaysOnTop)) +
+        L",startWithWindows:" + std::wstring(jsonBoolean(m_startWithWindows)) +
         L",elapsedSeconds:" + std::to_wstring(recordingElapsedSeconds()) +
         L",bitrate:" + std::to_wstring(m_bitrateMbps) +
         L",resolution:\"" + escapeJavaScriptString(m_resolution) +
@@ -604,6 +629,7 @@ void AppController::persistSettings() {
         m_microphoneEnabled,
         m_systemAudioEnabled,
         m_alwaysOnTop,
+        m_startWithWindows,
     };
     saveAppSettings(settings);
 }
