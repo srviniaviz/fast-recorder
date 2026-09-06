@@ -1,4 +1,0 @@
-#include "resource.h"
-
-IDI_FAST_RECORD ICON "../../assets/fast-record-icon.ico"
-
