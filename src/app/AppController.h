@@ -67,6 +67,7 @@ private:
     void showAboutDialog();
 
     std::wstring engineValue() const;
+    std::wstring codecValue() const;
     std::wstring selectedEngineStatus() const;
     std::wstring statusText() const;
     std::filesystem::path recordingsDirectory() const;
@@ -85,7 +86,9 @@ private:
     bool m_microphoneEnabled{true};
     bool m_webcamEnabled{false};
     bool m_alwaysOnTop{false};
+    int m_framesPerSecond{30};
     int m_bitrateMbps{20};
+    recording::VideoCodec m_codec{recording::VideoCodec::H264};
     std::wstring m_area{L"monitor"};
     std::wstring m_resolution{L"1920x1080"};
     std::wstring m_status{L"Pronto para gravar"};

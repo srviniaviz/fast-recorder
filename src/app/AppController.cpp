@@ -103,11 +103,14 @@ bool AppController::initialize() {
 
     const AppSettings savedSettings = loadAppSettings();
     m_recorder.setEngine(savedSettings.engine);
+    m_codec = savedSettings.codec;
     m_area = savedSettings.captureArea;
     m_resolution = savedSettings.resolution;
+    m_framesPerSecond = savedSettings.framesPerSecond;
     m_bitrateMbps = savedSettings.bitrateMbps;
     m_microphoneEnabled = savedSettings.microphoneEnabled;
-    m_webcamEnabled = savedSettings.webcamEnabled;
+    // Webcam capture is intentionally unavailable until its backend is implemented.
+    m_webcamEnabled = false;
     m_alwaysOnTop = savedSettings.alwaysOnTop;
     m_settingsLoaded = true;
 
@@ -431,8 +434,7 @@ void AppController::handleWebMessage(const std::wstring& message) {
         persistSettings();
         syncInterface();
     } else if (message == L"toggle-webcam") {
-        m_webcamEnabled = !m_webcamEnabled;
-        persistSettings();
+        m_webcamEnabled = false;
         syncInterface();
     } else if (message == L"open-folder") {
         openRecordingsFolder();
@@ -467,6 +469,15 @@ void AppController::handleWebMessage(const std::wstring& message) {
         }
         persistSettings();
         syncInterface();
+    } else if (message.starts_with(L"codec:")) {
+        const std::wstring value = message.substr(6);
+        if (value == L"av1") {
+            m_codec = recording::VideoCodec::Av1;
+        } else {
+            m_codec = recording::VideoCodec::H264;
+        }
+        persistSettings();
+        syncInterface();
     } else if (message.starts_with(L"area:")) {
         const std::wstring area = message.substr(5);
         if (area == L"monitor" || area == L"window" || area == L"region") {
@@ -491,6 +502,16 @@ void AppController::handleWebMessage(const std::wstring& message) {
             persistSettings();
         }
         syncInterface();
+    } else if (message.starts_with(L"fps:")) {
+        const std::wstring value = message.substr(4);
+        wchar_t* end = nullptr;
+        const long parsed = std::wcstol(value.c_str(), &end, 10);
+        if (end != value.c_str() && *end == L'\0' &&
+            (parsed == 24 || parsed == 30 || parsed == 60 || parsed == 120)) {
+            m_framesPerSecond = static_cast<int>(parsed);
+            persistSettings();
+        }
+        syncInterface();
     }
 }
 
@@ -508,7 +529,9 @@ void AppController::syncInterface() {
         L",pinned:" + std::wstring(jsonBoolean(m_alwaysOnTop)) +
         L",bitrate:" + std::to_wstring(m_bitrateMbps) +
         L",resolution:\"" + escapeJavaScriptString(m_resolution) +
+        L"\",fps:\"" + std::to_wstring(m_framesPerSecond) +
         L"\",engine:\"" + escapeJavaScriptString(engineValue()) +
+        L"\",codec:\"" + escapeJavaScriptString(codecValue()) +
         L"\",area:\"" + escapeJavaScriptString(m_area) +
         L"\",status:\"" + escapeJavaScriptString(statusText()) +
         L"\",capability:\"" + escapeJavaScriptString(selectedEngineStatus()) +
@@ -524,8 +547,10 @@ void AppController::persistSettings() {
 
     const AppSettings settings{
         m_recorder.engine(),
+        m_codec,
         m_area,
         m_resolution,
+        m_framesPerSecond,
         m_bitrateMbps,
         m_microphoneEnabled,
         m_webcamEnabled,
@@ -558,8 +583,9 @@ void AppController::startRecording() {
     settings.outputDirectory = recordingsDirectory();
     settings.width = width;
     settings.height = height;
-    settings.framesPerSecond = 30;
+    settings.framesPerSecond = static_cast<std::uint32_t>(m_framesPerSecond);
     settings.bitrateMbps = static_cast<std::uint32_t>(m_bitrateMbps);
+    settings.codec = m_codec;
     settings.captureCursor = true;
     settings.captureSystemAudio = false;
     settings.captureMicrophone = false;
@@ -624,17 +650,35 @@ std::wstring AppController::engineValue() const {
     }
 }
 
+std::wstring AppController::codecValue() const {
+    return m_codec == recording::VideoCodec::Av1 ? L"av1" : L"h264";
+}
+
 std::wstring AppController::selectedEngineStatus() const {
+    const wchar_t* codec = m_codec == recording::VideoCodec::Av1 ? L"AV1" : L"H.264";
+    if (m_codec == recording::VideoCodec::Av1 && m_recorder.engine() != recording::EncoderEngine::Nvenc) {
+        return L"AV1 nesta versão exige selecionar o encoder NVENC.";
+    }
+
     switch (m_recorder.engine()) {
     case recording::EncoderEngine::Nvenc:
+        if (m_codec == recording::VideoCodec::Av1 && !m_nvencProbe.av1Supported) {
+            return m_nvencProbe.description + L" AV1 não está disponível nesta GPU/driver.";
+        }
         return m_nvencProbe.description +
-            L" A gravação atual usa o backend direto NVENC.";
+            L" A gravação atual usa o backend direto NVENC com " + codec + L".";
     case recording::EncoderEngine::Amf:
         return m_amfProbe.description +
             L" A gravação atual usa a seleção de hardware do Media Foundation.";
     case recording::EncoderEngine::Software:
-        return L"Compatível com qualquer GPU; utiliza a CPU.";
+        return std::wstring(L"Compatível com qualquer GPU; utiliza a CPU para ") + codec + L".";
     default:
+        if (m_codec == recording::VideoCodec::Av1) {
+            if (m_nvencProbe.av1Supported) {
+                return L"AV1 por NVENC disponível; selecione NVENC para gravar nesse formato.";
+            }
+            return L"AV1 requer NVENC compatível; selecione NVENC após atualizar o driver, se necessário.";
+        }
         if (m_nvencProbe.h264Supported) {
             return L"H.264 por hardware disponível; o Media Foundation escolherá o encoder.";
         }

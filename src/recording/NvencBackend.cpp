@@ -216,6 +216,448 @@ bool normalizeH264ToLengthPrefixed(
     return !packet.empty();
 }
 
+struct Av1Obu {
+    std::uint8_t type{0};
+    size_t headerSize{0};
+    size_t sizeFieldSize{0};
+    size_t payloadOffset{0};
+    size_t payloadSize{0};
+};
+
+bool readAv1Leb128(
+    const std::vector<std::uint8_t>& data,
+    size_t offset,
+    std::uint64_t& value,
+    size_t& bytesRead) {
+    value = 0;
+    bytesRead = 0;
+    for (; bytesRead < 8 && offset + bytesRead < data.size(); ++bytesRead) {
+        const std::uint8_t byte = data[offset + bytesRead];
+        value |= static_cast<std::uint64_t>(byte & 0x7f) << (bytesRead * 7);
+        if ((byte & 0x80) == 0) {
+            ++bytesRead;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parseAv1Obu(
+    const std::vector<std::uint8_t>& data,
+    size_t offset,
+    Av1Obu& obu,
+    size_t& totalSize) {
+    if (offset >= data.size()) {
+        return false;
+    }
+
+    const std::uint8_t header = data[offset];
+    if ((header & 0x80) != 0) {
+        return false;
+    }
+
+    obu = {};
+    obu.type = static_cast<std::uint8_t>((header >> 3) & 0x0f);
+    obu.headerSize = 1 + ((header & 0x04) != 0 ? 1 : 0);
+    if (offset + obu.headerSize > data.size()) {
+        return false;
+    }
+
+    const bool hasSizeField = (header & 0x02) != 0;
+    if (!hasSizeField) {
+        obu.payloadOffset = offset + obu.headerSize;
+        obu.payloadSize = data.size() - obu.payloadOffset;
+        obu.sizeFieldSize = 0;
+        totalSize = data.size() - offset;
+        return obu.payloadSize > 0;
+    }
+
+    std::uint64_t payloadSize = 0;
+    if (!readAv1Leb128(data, offset + obu.headerSize, payloadSize, obu.sizeFieldSize) ||
+        payloadSize > data.size() - offset - obu.headerSize - obu.sizeFieldSize) {
+        return false;
+    }
+
+    obu.payloadOffset = offset + obu.headerSize + obu.sizeFieldSize;
+    obu.payloadSize = static_cast<size_t>(payloadSize);
+    totalSize = obu.headerSize + obu.sizeFieldSize + obu.payloadSize;
+    return totalSize > 0;
+}
+
+class Av1BitReader final {
+public:
+    Av1BitReader(const std::uint8_t* data, size_t size)
+        : m_data(data), m_bitCount(size * 8) {}
+
+    bool read(unsigned count, std::uint32_t& value) {
+        if (count > 32 || m_position + count > m_bitCount) {
+            return false;
+        }
+
+        value = 0;
+        for (unsigned index = 0; index < count; ++index) {
+            value = (value << 1) | ((m_data[(m_position + index) / 8] >> (7 - ((m_position + index) % 8))) & 1u);
+        }
+        m_position += count;
+        return true;
+    }
+
+    bool skip(size_t count) {
+        if (m_position + count > m_bitCount) {
+            return false;
+        }
+        m_position += count;
+        return true;
+    }
+
+    bool bit(bool& value) {
+        std::uint32_t raw = 0;
+        if (!read(1, raw)) {
+            return false;
+        }
+        value = raw != 0;
+        return true;
+    }
+
+    bool uvlc() {
+        unsigned leadingZeros = 0;
+        while (leadingZeros < 32) {
+            bool value = false;
+            if (!bit(value)) {
+                return false;
+            }
+            if (value) {
+                break;
+            }
+            ++leadingZeros;
+        }
+        return leadingZeros < 32 && skip(leadingZeros);
+    }
+
+private:
+    const std::uint8_t* m_data{nullptr};
+    size_t m_bitCount{0};
+    size_t m_position{0};
+};
+
+struct Av1SequenceInfo {
+    std::uint32_t profile{0};
+    std::uint32_t level{0};
+    std::uint32_t tier{0};
+    std::uint32_t bitDepth{8};
+    bool monochrome{false};
+    bool chromaSubsamplingX{true};
+    bool chromaSubsamplingY{true};
+    std::uint32_t chromaSamplePosition{0};
+};
+
+bool parseAv1SequenceHeader(
+    const std::vector<std::uint8_t>& payload,
+    Av1SequenceInfo& info) {
+    if (payload.empty()) {
+        return false;
+    }
+
+    Av1BitReader bits(payload.data(), payload.size());
+    std::uint32_t value = 0;
+    if (!bits.read(3, info.profile) || !bits.skip(1)) {
+        return false;
+    }
+
+    if (!bits.read(1, value)) {
+        return false;
+    }
+    const bool reducedStillPictureHeader = value != 0;
+    if (reducedStillPictureHeader) {
+        if (!bits.read(5, info.level)) {
+            return false;
+        }
+        info.tier = 0;
+    } else {
+        bool timingInfoPresent = false;
+        if (!bits.bit(timingInfoPresent)) {
+            return false;
+        }
+
+        bool decoderModelInfoPresent = false;
+        unsigned bufferDelayLengthMinus1 = 0;
+        if (timingInfoPresent) {
+            if (!bits.skip(64)) {
+                return false;
+            }
+            bool equalPictureInterval = false;
+            if (!bits.bit(equalPictureInterval)) {
+                return false;
+            }
+            if (equalPictureInterval && !bits.uvlc()) {
+                return false;
+            }
+            if (!bits.bit(decoderModelInfoPresent)) {
+                return false;
+            }
+            if (decoderModelInfoPresent) {
+                if (!bits.read(5, value)) {
+                    return false;
+                }
+                bufferDelayLengthMinus1 = static_cast<unsigned>(value);
+                if (!bits.skip(42)) {
+                    return false;
+                }
+            }
+        }
+
+        bool initialDisplayDelayPresent = false;
+        std::uint32_t operatingPointCountMinus1 = 0;
+        if (!bits.bit(initialDisplayDelayPresent) ||
+            !bits.read(5, operatingPointCountMinus1)) {
+            return false;
+        }
+
+        for (std::uint32_t index = 0; index <= operatingPointCountMinus1; ++index) {
+            std::uint32_t level = 0;
+            if (!bits.skip(12) || !bits.read(5, level)) {
+                return false;
+            }
+            std::uint32_t tierValue = 0;
+            if (level > 7) {
+                bool tierBit = false;
+                if (!bits.bit(tierBit)) {
+                    return false;
+                }
+                tierValue = tierBit ? 1u : 0u;
+            }
+
+            if (decoderModelInfoPresent) {
+                bool presentForOperation = false;
+                if (!bits.bit(presentForOperation)) {
+                    return false;
+                }
+                if (presentForOperation &&
+                    (!bits.skip((bufferDelayLengthMinus1 + 1) * 2) || !bits.skip(1))) {
+                    return false;
+                }
+            }
+
+            if (initialDisplayDelayPresent) {
+                bool presentForOperation = false;
+                if (!bits.bit(presentForOperation)) {
+                    return false;
+                }
+                if (presentForOperation && !bits.skip(4)) {
+                    return false;
+                }
+            }
+            if (index == 0) {
+                info.level = level;
+                info.tier = tierValue;
+            }
+        }
+    }
+
+    std::uint32_t frameWidthBitsMinus1 = 0;
+    std::uint32_t frameHeightBitsMinus1 = 0;
+    if (!bits.read(4, frameWidthBitsMinus1) ||
+        !bits.read(4, frameHeightBitsMinus1) ||
+        !bits.skip(frameWidthBitsMinus1 + 1) ||
+        !bits.skip(frameHeightBitsMinus1 + 1)) {
+        return false;
+    }
+
+    if (!reducedStillPictureHeader) {
+        bool frameIdNumbersPresent = false;
+        if (!bits.bit(frameIdNumbersPresent)) {
+            return false;
+        }
+        if (frameIdNumbersPresent && !bits.skip(7)) {
+            return false;
+        }
+    }
+
+    if (!bits.skip(3)) {
+        return false;
+    }
+    if (!reducedStillPictureHeader) {
+        if (!bits.skip(4)) {
+            return false;
+        }
+        bool enableOrderHint = false;
+        if (!bits.bit(enableOrderHint)) {
+            return false;
+        }
+        if (enableOrderHint && !bits.skip(2)) {
+            return false;
+        }
+
+        bool chooseScreenContentTools = false;
+        if (!bits.bit(chooseScreenContentTools)) {
+            return false;
+        }
+        if (!chooseScreenContentTools) {
+            bool forceScreenContentTools = false;
+            if (!bits.bit(forceScreenContentTools)) {
+                return false;
+            }
+            if (forceScreenContentTools) {
+                bool chooseIntegerMv = false;
+                if (!bits.bit(chooseIntegerMv)) {
+                    return false;
+                }
+                if (!chooseIntegerMv && !bits.skip(1)) {
+                    return false;
+                }
+            }
+        }
+        if (enableOrderHint && !bits.skip(3)) {
+            return false;
+        }
+    }
+
+    if (!bits.skip(3)) {
+        return false;
+    }
+
+    bool highBitDepth = false;
+    if (!bits.bit(highBitDepth)) {
+        return false;
+    }
+    const bool twelveBit = info.profile == 2 && highBitDepth && [&bits]() {
+        bool result = false;
+        return bits.bit(result) && result;
+    }();
+    info.bitDepth = 8 + (highBitDepth ? 2u : 0u) + (twelveBit ? 2u : 0u);
+
+    if (info.profile == 1) {
+        info.monochrome = false;
+    } else if (!bits.bit(info.monochrome)) {
+        return false;
+    }
+
+    bool colorDescriptionPresent = false;
+    if (!bits.bit(colorDescriptionPresent)) {
+        return false;
+    }
+    std::uint32_t colorPrimaries = 0;
+    std::uint32_t transferCharacteristics = 0;
+    std::uint32_t matrixCoefficients = 0;
+    if (colorDescriptionPresent &&
+        (!bits.read(8, colorPrimaries) || !bits.read(8, transferCharacteristics) ||
+            !bits.read(8, matrixCoefficients))) {
+        return false;
+    }
+
+    if (info.monochrome) {
+        if (!bits.skip(1)) {
+            return false;
+        }
+        info.chromaSubsamplingX = true;
+        info.chromaSubsamplingY = true;
+        info.chromaSamplePosition = 0;
+    } else if (colorPrimaries == 1 && transferCharacteristics == 13 && matrixCoefficients == 0) {
+        info.chromaSubsamplingX = false;
+        info.chromaSubsamplingY = false;
+    } else if (info.profile == 0) {
+        if (!bits.skip(1)) {
+            return false;
+        }
+        info.chromaSubsamplingX = true;
+        info.chromaSubsamplingY = true;
+        info.chromaSamplePosition = 0;
+    } else if (info.profile == 1) {
+        if (!bits.skip(1)) {
+            return false;
+        }
+        info.chromaSubsamplingX = false;
+        info.chromaSubsamplingY = false;
+        info.chromaSamplePosition = 0;
+    } else if (twelveBit) {
+        if (!bits.bit(info.chromaSubsamplingX)) {
+            return false;
+        }
+        if (info.chromaSubsamplingX && !bits.bit(info.chromaSubsamplingY)) {
+            return false;
+        }
+        if (info.chromaSubsamplingX && info.chromaSubsamplingY && !bits.read(2, info.chromaSamplePosition)) {
+            return false;
+        }
+    } else {
+        if (!bits.skip(1)) {
+            return false;
+        }
+        info.chromaSubsamplingX = true;
+        info.chromaSubsamplingY = false;
+        info.chromaSamplePosition = 0;
+    }
+
+    return bits.skip(1);
+}
+
+bool extractAv1CodecConfiguration(
+    const std::vector<std::uint8_t>& encoded,
+    std::vector<std::uint8_t>& configuration) {
+    configuration.clear();
+    size_t offset = 0;
+    while (offset < encoded.size()) {
+        Av1Obu obu{};
+        size_t totalSize = 0;
+        if (!parseAv1Obu(encoded, offset, obu, totalSize)) {
+            return false;
+        }
+        if (obu.type == 1) { // AV1_OBU_SEQUENCE_HEADER
+            std::vector<std::uint8_t> payload(
+                encoded.begin() + static_cast<std::ptrdiff_t>(obu.payloadOffset),
+                encoded.begin() + static_cast<std::ptrdiff_t>(obu.payloadOffset + obu.payloadSize));
+            Av1SequenceInfo info{};
+            if (!parseAv1SequenceHeader(payload, info)) {
+                return false;
+            }
+
+            configuration.push_back(static_cast<std::uint8_t>(0x81 | ((info.profile & 0x07) << 4)));
+            configuration.push_back(static_cast<std::uint8_t>((info.tier ? 0x80 : 0) | (info.level & 0x1f)));
+            configuration.push_back(static_cast<std::uint8_t>(
+                (info.bitDepth > 8 ? 0x40 : 0) |
+                (info.bitDepth == 12 ? 0x20 : 0) |
+                (info.monochrome ? 0x10 : 0) |
+                (info.chromaSubsamplingX ? 0x08 : 0) |
+                (info.chromaSubsamplingY ? 0x04 : 0) |
+                (info.chromaSamplePosition & 0x03)));
+            configuration.push_back(0);
+            configuration.insert(
+                configuration.end(),
+                encoded.begin() + static_cast<std::ptrdiff_t>(offset),
+                encoded.begin() + static_cast<std::ptrdiff_t>(offset + totalSize));
+            return true;
+        }
+        offset += totalSize;
+    }
+    return false;
+}
+
+bool normalizeAv1ToSample(
+    const std::vector<std::uint8_t>& encoded,
+    std::vector<std::uint8_t>& packet) {
+    packet.clear();
+    if (encoded.empty()) {
+        return false;
+    }
+
+    size_t offset = 0;
+    bool foundObu = false;
+    while (offset < encoded.size()) {
+        Av1Obu obu{};
+        size_t totalSize = 0;
+        if (!parseAv1Obu(encoded, offset, obu, totalSize)) {
+            return false;
+        }
+        foundObu = true;
+        offset += totalSize;
+    }
+    if (!foundObu) {
+        return false;
+    }
+    packet = encoded;
+    return true;
+}
+
 bool extractH264SequenceHeader(
     const std::vector<std::uint8_t>& encoded,
     std::vector<std::uint8_t>& sequenceHeader) {
@@ -362,9 +804,9 @@ bool containsH264NalType(const std::vector<std::uint8_t>& encoded, std::uint8_t 
     return false;
 }
 
-class H264Mp4Writer final {
+class Mp4Writer final {
 public:
-    ~H264Mp4Writer() {
+    ~Mp4Writer() {
         std::wstring ignored;
         finalize(ignored);
     }
@@ -375,10 +817,17 @@ public:
         std::uint32_t height,
         std::uint32_t fps,
         std::uint32_t bitrate,
+        VideoCodec codec,
         const std::vector<std::uint8_t>& sequenceHeader,
         std::wstring& error) {
-        if (!extractParameterSets(sequenceHeader, m_sps, m_pps)) {
-            error = L"O cabeçalho H.264 do NVENC não contém SPS e PPS válidos.";
+        m_codec = codec;
+        if (m_codec == VideoCodec::H264) {
+            if (!extractParameterSets(sequenceHeader, m_sps, m_pps)) {
+                error = L"O cabeçalho H.264 do NVENC não contém SPS e PPS válidos.";
+                return false;
+            }
+        } else if (!extractAv1CodecConfiguration(sequenceHeader, m_av1Configuration)) {
+            error = L"O primeiro pacote AV1 do NVENC não contém um cabeçalho de sequência válido.";
             return false;
         }
 
@@ -397,6 +846,7 @@ public:
         m_dataBytes = 0;
         m_samples.clear();
         m_keyFrames.clear();
+        m_firstSample = true;
 
         writeBigEndian(m_file, 32, 4);
         m_file.write("ftyp", 4);
@@ -404,7 +854,7 @@ public:
         writeBigEndian(m_file, 0x00000200, 4);
         m_file.write("isom", 4);
         m_file.write("iso2", 4);
-        m_file.write("avc1", 4);
+        m_file.write(m_codec == VideoCodec::H264 ? "avc1" : "av01", 4);
         m_file.write("mp41", 4);
 
         writeBigEndian(m_file, 1, 4);
@@ -432,12 +882,19 @@ public:
         }
 
         std::vector<std::uint8_t> packet;
-        if (!normalizeH264ToLengthPrefixed(encoded, packet)) {
-            error = L"O NVENC retornou um pacote H.264 vazio ou inválido.";
+        const bool normalized = m_codec == VideoCodec::H264
+            ? normalizeH264ToLengthPrefixed(encoded, packet)
+            : normalizeAv1ToSample(encoded, packet);
+        if (!normalized) {
+            error = m_codec == VideoCodec::H264
+                ? L"O NVENC retornou um pacote H.264 vazio ou inválido."
+                : L"O NVENC retornou um pacote AV1 vazio ou inválido.";
             return false;
         }
         if (packet.size() > static_cast<size_t>(UINT32_MAX)) {
-            error = L"O pacote H.264 retornado pelo NVENC é grande demais.";
+            error = m_codec == VideoCodec::H264
+                ? L"O pacote H.264 retornado pelo NVENC é grande demais."
+                : L"O pacote AV1 retornado pelo NVENC é grande demais.";
             return false;
         }
 
@@ -445,13 +902,15 @@ public:
         m_file.seekp(0, std::ios::end);
         m_file.write(reinterpret_cast<const char*>(packet.data()), static_cast<std::streamsize>(packet.size()));
         if (!m_file.good()) {
-            error = L"Não foi possível gravar o pacote H.264 no arquivo MP4.";
+            error = m_codec == VideoCodec::H264
+                ? L"Não foi possível gravar o pacote H.264 no arquivo MP4."
+                : L"Não foi possível gravar o pacote AV1 no arquivo MP4.";
             return false;
         }
 
         m_dataBytes += packet.size();
         m_samples.push_back({offset, static_cast<std::uint32_t>(packet.size())});
-        if (m_firstSample || containsH264NalType(encoded, 5)) {
+        if (m_firstSample || (m_codec == VideoCodec::H264 && containsH264NalType(encoded, 5))) {
             m_keyFrames.push_back(m_samples.size());
         }
         m_firstSample = false;
@@ -465,7 +924,9 @@ public:
 
         try {
             if (m_samples.empty()) {
-                error = L"A gravação não produziu nenhum frame H.264.";
+                error = m_codec == VideoCodec::H264
+                    ? L"A gravação não produziu nenhum frame H.264."
+                    : L"A gravação não produziu nenhum frame AV1.";
                 m_file.close();
                 m_started = false;
                 return false;
@@ -587,6 +1048,43 @@ private:
         builder.endBox(avc1);
     }
 
+    void buildAv01(Mp4Builder& builder) const {
+        const size_t av01 = builder.beginBox("av01");
+        builder.zeros(6);
+        builder.u16(1);
+        builder.u16(0);
+        builder.u16(0);
+        builder.zeros(12);
+        builder.u16(static_cast<std::uint16_t>(m_width));
+        builder.u16(static_cast<std::uint16_t>(m_height));
+        builder.u32(0x00480000);
+        builder.u32(0x00480000);
+        builder.u32(0);
+        builder.u16(1);
+        builder.zeros(32);
+        builder.u16(0x0018);
+        builder.u16(0xffff);
+
+        const size_t av1C = builder.beginBox("av1C");
+        builder.append(m_av1Configuration);
+        builder.endBox(av1C);
+
+        const size_t btrt = builder.beginBox("btrt");
+        builder.u32(0);
+        builder.u32(m_bitrate);
+        builder.u32(m_bitrate);
+        builder.endBox(btrt);
+        builder.endBox(av01);
+    }
+
+    void buildVideoSampleEntry(Mp4Builder& builder) const {
+        if (m_codec == VideoCodec::H264) {
+            buildAvc1(builder);
+        } else {
+            buildAv01(builder);
+        }
+    }
+
     void buildMoov(Mp4Builder& builder) const {
         const auto sampleCount = static_cast<std::uint32_t>(m_samples.size());
         const size_t moov = builder.beginBox("moov");
@@ -667,7 +1165,7 @@ private:
         const size_t stsd = builder.beginBox("stsd");
         builder.fullBox(0, 0);
         builder.u32(1);
-        buildAvc1(builder);
+        buildVideoSampleEntry(builder);
         builder.endBox(stsd);
 
         const size_t stts = builder.beginBox("stts");
@@ -719,6 +1217,7 @@ private:
     std::fstream m_file;
     std::vector<std::uint8_t> m_sps;
     std::vector<std::uint8_t> m_pps;
+    std::vector<std::uint8_t> m_av1Configuration;
     std::vector<SampleInfo> m_samples;
     std::vector<size_t> m_keyFrames;
     std::uint32_t m_width{0};
@@ -728,6 +1227,7 @@ private:
     std::uint64_t m_mdatOffset{0};
     std::uint64_t m_dataOffset{0};
     std::uint64_t m_dataBytes{0};
+    VideoCodec m_codec{VideoCodec::H264};
     bool m_started{false};
     bool m_firstSample{true};
 };
@@ -745,6 +1245,7 @@ public:
         std::uint32_t height,
         std::uint32_t fps,
         std::uint32_t bitrate,
+        VideoCodec codec,
         std::wstring& error) {
         if (device == nullptr || texture == nullptr) {
             error = L"O dispositivo Direct3D 11 não está disponível para o NVENC.";
@@ -784,6 +1285,12 @@ public:
             return false;
         }
 
+        m_codec = codec;
+        const GUID encodeGuid = codec == VideoCodec::Av1
+            ? NV_ENC_CODEC_AV1_GUID
+            : NV_ENC_CODEC_H264_GUID;
+        const wchar_t* codecLabel = codec == VideoCodec::Av1 ? L"AV1" : L"H.264";
+
         GUID presetGuid = NV_ENC_PRESET_P3_GUID;
         NV_ENC_PRESET_CONFIG preset{};
         preset.version = NV_ENC_PRESET_CONFIG_VER;
@@ -791,7 +1298,7 @@ public:
         if (m_functions.nvEncGetEncodePresetConfigEx != nullptr) {
             status = m_functions.nvEncGetEncodePresetConfigEx(
                 m_session,
-                NV_ENC_CODEC_H264_GUID,
+                encodeGuid,
                 presetGuid,
                 NV_ENC_TUNING_INFO_LOW_LATENCY,
                 &preset);
@@ -800,7 +1307,7 @@ public:
         }
         if (status != NV_ENC_SUCCESS) {
             status = m_functions.nvEncGetEncodePresetConfig(
-                m_session, NV_ENC_CODEC_H264_GUID, presetGuid, &preset);
+                m_session, encodeGuid, presetGuid, &preset);
         }
         if (status != NV_ENC_SUCCESS) {
             // Some older driver branches expose the legacy presets only.
@@ -811,7 +1318,7 @@ public:
             if (m_functions.nvEncGetEncodePresetConfigEx != nullptr) {
                 status = m_functions.nvEncGetEncodePresetConfigEx(
                     m_session,
-                    NV_ENC_CODEC_H264_GUID,
+                    encodeGuid,
                     presetGuid,
                     NV_ENC_TUNING_INFO_LOW_LATENCY,
                     &preset);
@@ -820,18 +1327,23 @@ public:
             }
             if (status != NV_ENC_SUCCESS) {
                 status = m_functions.nvEncGetEncodePresetConfig(
-                    m_session, NV_ENC_CODEC_H264_GUID, presetGuid, &preset);
+                    m_session, encodeGuid, presetGuid, &preset);
             }
         }
         if (status != NV_ENC_SUCCESS) {
-            error = nvencStatusMessage(L"Não foi possível consultar o preset H.264 do NVENC", status, &m_functions, m_session);
+            std::wstring operation = L"Não foi possível consultar o preset ";
+            operation += codecLabel;
+            operation += L" do NVENC";
+            error = nvencStatusMessage(operation.c_str(), status, &m_functions, m_session);
             shutdown();
             return false;
         }
 
         m_config = preset.presetCfg;
         m_config.version = NV_ENC_CONFIG_VER;
-        m_config.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+        m_config.profileGUID = codec == VideoCodec::Av1
+            ? NV_ENC_AV1_PROFILE_MAIN_GUID
+            : NV_ENC_H264_PROFILE_HIGH_GUID;
         m_config.gopLength = std::max<std::uint32_t>(fps * 2, 1);
         m_config.frameIntervalP = 1;
         m_config.rcParams.version = NV_ENC_RC_PARAMS_VER;
@@ -841,16 +1353,26 @@ public:
         m_config.rcParams.enableLookahead = 0;
         m_config.rcParams.lookaheadDepth = 0;
         m_config.rcParams.zeroReorderDelay = 1;
-        m_config.encodeCodecConfig.h264Config.idrPeriod = m_config.gopLength;
-        m_config.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
-        m_config.encodeCodecConfig.h264Config.disableSPSPPS = 0;
-        m_config.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
-        m_config.encodeCodecConfig.h264Config.inputBitDepth = NV_ENC_BIT_DEPTH_8;
-        m_config.encodeCodecConfig.h264Config.outputBitDepth = NV_ENC_BIT_DEPTH_8;
+        if (codec == VideoCodec::H264) {
+            m_config.encodeCodecConfig.h264Config.idrPeriod = m_config.gopLength;
+            m_config.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
+            m_config.encodeCodecConfig.h264Config.disableSPSPPS = 0;
+            m_config.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
+            m_config.encodeCodecConfig.h264Config.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+            m_config.encodeCodecConfig.h264Config.outputBitDepth = NV_ENC_BIT_DEPTH_8;
+        } else {
+            m_config.encodeCodecConfig.av1Config.idrPeriod = m_config.gopLength;
+            m_config.encodeCodecConfig.av1Config.outputAnnexBFormat = 0;
+            m_config.encodeCodecConfig.av1Config.disableSeqHdr = 0;
+            m_config.encodeCodecConfig.av1Config.repeatSeqHdr = 1;
+            m_config.encodeCodecConfig.av1Config.chromaFormatIDC = 1;
+            m_config.encodeCodecConfig.av1Config.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+            m_config.encodeCodecConfig.av1Config.outputBitDepth = NV_ENC_BIT_DEPTH_8;
+        }
 
         NV_ENC_INITIALIZE_PARAMS initializeParams{};
         initializeParams.version = NV_ENC_INITIALIZE_PARAMS_VER;
-        initializeParams.encodeGUID = NV_ENC_CODEC_H264_GUID;
+        initializeParams.encodeGUID = encodeGuid;
         initializeParams.presetGUID = presetGuid;
         initializeParams.encodeWidth = width;
         initializeParams.encodeHeight = height;
@@ -866,7 +1388,10 @@ public:
         initializeParams.encodeConfig = &m_config;
         status = m_functions.nvEncInitializeEncoder(m_session, &initializeParams);
         if (status != NV_ENC_SUCCESS) {
-            error = nvencStatusMessage(L"Não foi possível inicializar o encoder H.264 NVENC", status, &m_functions, m_session);
+            std::wstring operation = L"Não foi possível inicializar o encoder ";
+            operation += codecLabel;
+            operation += L" NVENC";
+            error = nvencStatusMessage(operation.c_str(), status, &m_functions, m_session);
             shutdown();
             return false;
         }
@@ -981,7 +1506,13 @@ public:
         }
         if (status != NV_ENC_SUCCESS) {
             if (error.empty()) {
-                error = nvencStatusMessage(L"Não foi possível obter o pacote H.264 do NVENC", status, &m_functions, m_session);
+                error = nvencStatusMessage(
+                    m_codec == VideoCodec::Av1
+                        ? L"Não foi possível obter o pacote AV1 do NVENC"
+                        : L"Não foi possível obter o pacote H.264 do NVENC",
+                    status,
+                    &m_functions,
+                    m_session);
             }
             return false;
         }
@@ -1033,6 +1564,7 @@ private:
     NV_ENC_REGISTERED_PTR m_registeredResource{nullptr};
     NV_ENC_OUTPUT_PTR m_bitstream{nullptr};
     NV_ENC_CONFIG m_config{};
+    VideoCodec m_codec{VideoCodec::H264};
     std::uint32_t m_width{0};
     std::uint32_t m_height{0};
     LONGLONG m_frameDuration{0};
@@ -1193,7 +1725,15 @@ void NvencBackend::recordLoop(
 
         NvencEncoder encoder;
         std::wstring encoderError;
-        if (!encoder.initialize(capture->device(), capture->texture(), width, height, fps, bitrate, encoderError)) {
+        if (!encoder.initialize(
+                capture->device(),
+                capture->texture(),
+                width,
+                height,
+                fps,
+                bitrate,
+                settings.codec,
+                encoderError)) {
             reportStartup(encoderError);
             setWorkerError(encoderError);
             return;
@@ -1216,24 +1756,30 @@ void NvencBackend::recordLoop(
             }
         }
         if (firstPacket.empty()) {
-            loopError = L"O NVENC não produziu o primeiro frame H.264.";
+            loopError = settings.codec == VideoCodec::Av1
+                ? L"O NVENC não produziu o primeiro frame AV1."
+                : L"O NVENC não produziu o primeiro frame H.264.";
             reportStartup(loopError);
             setWorkerError(loopError);
             return;
         }
 
         std::vector<std::uint8_t> sequenceHeader;
-        if (!extractH264SequenceHeader(firstPacket, sequenceHeader)) {
-            loopError = L"O primeiro pacote H.264 do NVENC não contém SPS e PPS.";
-            reportStartup(loopError);
-            setWorkerError(loopError);
-            return;
+        if (settings.codec == VideoCodec::H264) {
+            if (!extractH264SequenceHeader(firstPacket, sequenceHeader)) {
+                loopError = L"O primeiro pacote H.264 do NVENC não contém SPS e PPS.";
+                reportStartup(loopError);
+                setWorkerError(loopError);
+                return;
+            }
+        } else {
+            sequenceHeader = firstPacket;
         }
 
-        H264Mp4Writer writer;
+        Mp4Writer writer;
         const auto output = outputPath();
         std::wstring writerError;
-        if (!writer.start(output, width, height, fps, bitrate, sequenceHeader, writerError)) {
+        if (!writer.start(output, width, height, fps, bitrate, settings.codec, sequenceHeader, writerError)) {
             reportStartup(writerError);
             setWorkerError(writerError);
             return;

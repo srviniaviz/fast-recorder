@@ -15,6 +15,11 @@ enum class EncoderEngine {
     Software,
 };
 
+enum class VideoCodec {
+    H264,
+    Av1,
+};
+
 enum class CaptureTargetKind {
     CurrentMonitor,
     SelectedMonitor,
@@ -35,6 +40,7 @@ struct RecordingSettings {
     std::uint32_t framesPerSecond{30};
     std::uint32_t bitrateMbps{20};
     EncoderEngine engine{EncoderEngine::Automatic};
+    VideoCodec codec{VideoCodec::H264};
     bool captureCursor{true};
     bool captureSystemAudio{true};
     bool captureMicrophone{false};

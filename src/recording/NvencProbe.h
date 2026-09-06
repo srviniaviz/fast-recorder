@@ -9,10 +9,10 @@ struct NvencProbeResult {
     bool sdkBindingsCompiled{false};
     bool encodeSessionOpened{false};
     bool h264Supported{false};
+    bool av1Supported{false};
     std::wstring description;
 };
 
 NvencProbeResult probeNvenc();
 
 } // namespace fastrecord::recording
-

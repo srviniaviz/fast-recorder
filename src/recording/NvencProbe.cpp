@@ -24,7 +24,13 @@ namespace {
 
 class Library final {
 public:
-    Library() : handle(LoadLibraryW(L"nvEncodeAPI.dll")) {}
+    Library() {
+#if defined(_WIN64)
+        handle = LoadLibraryW(L"nvEncodeAPI64.dll");
+#else
+        handle = LoadLibraryW(L"nvEncodeAPI.dll");
+#endif
+    }
     ~Library() {
         if (handle != nullptr) {
             FreeLibrary(handle);
@@ -74,7 +80,7 @@ NvencProbeResult probeNvenc() {
 
     Library library;
     if (library.handle == nullptr) {
-        result.description = L"NVENC não disponível: nvEncodeAPI.dll não foi encontrada.";
+        result.description = L"NVENC não disponível: a biblioteca do driver não foi encontrada.";
         return result;
     }
     result.runtimeLibraryFound = true;
@@ -126,7 +132,8 @@ NvencProbeResult probeNvenc() {
             for (uint32_t index = 0; index < returnedCount; ++index) {
                 if (IsEqualGUID(guids[index], NV_ENC_CODEC_H264_GUID)) {
                     result.h264Supported = true;
-                    break;
+                } else if (IsEqualGUID(guids[index], NV_ENC_CODEC_AV1_GUID)) {
+                    result.av1Supported = true;
                 }
             }
         }
@@ -134,9 +141,15 @@ NvencProbeResult probeNvenc() {
 
     functions.nvEncDestroyEncoder(session);
 
-    result.description = result.h264Supported
-        ? L"NVENC disponível para H.264."
-        : L"NVENC encontrado, mas H.264 não foi anunciado pela API.";
+    if (result.h264Supported && result.av1Supported) {
+        result.description = L"NVENC disponível para H.264 e AV1.";
+    } else if (result.h264Supported) {
+        result.description = L"NVENC disponível para H.264; AV1 não foi anunciado pela API.";
+    } else if (result.av1Supported) {
+        result.description = L"NVENC disponível para AV1; H.264 não foi anunciado pela API.";
+    } else {
+        result.description = L"NVENC encontrado, mas nenhum codec compatível foi anunciado pela API.";
+    }
 #else
     HMODULE library = nullptr;
 #if defined(_WIN64)

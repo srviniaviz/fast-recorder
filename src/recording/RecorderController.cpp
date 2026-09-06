@@ -20,6 +20,11 @@ OperationResult RecorderController::start(const RecordingSettings& settings) {
     RecordingSettings effectiveSettings = settings;
     effectiveSettings.engine = m_engine;
 
+    if (settings.codec == VideoCodec::Av1 && m_engine != EncoderEngine::Nvenc) {
+        m_state = RecorderState::Idle;
+        return {false, L"AV1 nesta versão exige selecionar o encoder NVENC."};
+    }
+
     if (m_engine == EncoderEngine::Nvenc) {
         m_backend = std::make_unique<NvencBackend>();
     } else {

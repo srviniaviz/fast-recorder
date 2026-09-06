@@ -9,8 +9,9 @@
 
 namespace fastrecord::recording {
 
-// Direct NVIDIA H.264 path. The class is still present when the SDK headers
-// are unavailable so an explicit NVENC selection can report a useful error.
+// Direct NVIDIA H.264/AV1 path. The class is still present when the SDK
+// headers are unavailable so an explicit NVENC selection can report a useful
+// error.
 class NvencBackend final : public IRecordingBackend {
 public:
     NvencBackend() = default;

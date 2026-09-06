@@ -65,6 +65,11 @@ bool isValidResolution(const std::wstring& resolution) {
         resolution == L"2560x1440" || resolution == L"3840x2160";
 }
 
+bool isValidFrameRate(int framesPerSecond) {
+    return framesPerSecond == 24 || framesPerSecond == 30 ||
+        framesPerSecond == 60 || framesPerSecond == 120;
+}
+
 } // namespace
 
 AppSettings loadAppSettings() {
@@ -79,6 +84,11 @@ AppSettings loadAppSettings() {
         settings.engine = static_cast<recording::EncoderEngine>(engine);
     }
 
+    const DWORD codec = readDword(key, L"Codec", 0);
+    if (codec <= static_cast<DWORD>(recording::VideoCodec::Av1)) {
+        settings.codec = static_cast<recording::VideoCodec>(codec);
+    }
+
     const std::wstring area = readString(key, L"CaptureArea", settings.captureArea);
     if (isValidArea(area)) {
         settings.captureArea = area;
@@ -87,6 +97,11 @@ AppSettings loadAppSettings() {
     const std::wstring resolution = readString(key, L"Resolution", settings.resolution);
     if (isValidResolution(resolution)) {
         settings.resolution = resolution;
+    }
+
+    const int framesPerSecond = static_cast<int>(readDword(key, L"FramesPerSecond", 30));
+    if (isValidFrameRate(framesPerSecond)) {
+        settings.framesPerSecond = framesPerSecond;
     }
 
     settings.bitrateMbps = std::clamp(
@@ -118,8 +133,11 @@ bool saveAppSettings(const AppSettings& settings) {
 
     const bool saved =
         writeDword(key, L"Encoder", static_cast<DWORD>(settings.engine)) &&
+        writeDword(key, L"Codec", static_cast<DWORD>(settings.codec)) &&
         writeString(key, L"CaptureArea", settings.captureArea) &&
         writeString(key, L"Resolution", settings.resolution) &&
+        writeDword(key, L"FramesPerSecond", static_cast<DWORD>(
+            isValidFrameRate(settings.framesPerSecond) ? settings.framesPerSecond : 30)) &&
         writeDword(key, L"BitrateMbps", static_cast<DWORD>(std::clamp(settings.bitrateMbps, 4, 80))) &&
         writeDword(key, L"MicrophoneEnabled", settings.microphoneEnabled ? 1u : 0u) &&
         writeDword(key, L"WebcamEnabled", settings.webcamEnabled ? 1u : 0u) &&

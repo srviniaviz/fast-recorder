@@ -89,6 +89,12 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings)
     if (const auto options = m_session.try_as<IGraphicsCaptureSession2>()) {
         options.IsCursorCaptureEnabled(settings.captureCursor);
     }
+    // Windows Graphics Capture adds a colored border to the captured display
+    // by default. It is useful for interactive capture tools, but it becomes
+    // part of the user's desktop while Fast Record is recording.
+    if (const auto options = m_session.try_as<IGraphicsCaptureSession3>()) {
+        options.IsBorderRequired(false);
+    }
     m_session.StartCapture();
 }
 

@@ -14,6 +14,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::filesystem::path outputDirectory = argc > 1
         ? argv[1]
         : std::filesystem::current_path() / L"nvenc-smoke-output";
+    const bool av1 = argc > 2 && std::wstring(argv[2]) == L"av1";
 
     RecordingSettings settings{};
     settings.target.kind = CaptureTargetKind::CurrentMonitor;
@@ -23,6 +24,7 @@ int wmain(int argc, wchar_t** argv) {
     settings.framesPerSecond = 30;
     settings.bitrateMbps = 12;
     settings.engine = EncoderEngine::Nvenc;
+    settings.codec = av1 ? VideoCodec::Av1 : VideoCodec::H264;
     settings.captureCursor = true;
 
     NvencBackend backend;
