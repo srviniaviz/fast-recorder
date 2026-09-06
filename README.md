@@ -19,7 +19,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - atalhos globais para gravar, pausar e parar;
 - controles de gravar, pausar e parar;
 - captura do monitor atual em MP4/H.264;
-- escolha entre NVENC, AMD AMF e codificação por software;
+- codificação por software ou seleção automática do Media Foundation;
 - resolução configurável de 720p a 4K;
 - bitrate ajustável entre 4 e 80 Mbps;
 - preferências restauradas depois de fechar e abrir o aplicativo;
@@ -47,13 +47,17 @@ A janela é nativa em C++, com a camada visual renderizada pelo WebView2. Isso m
             ▼
     Media Foundation ── MP4 / H.264
 
-O primeiro backend captura o monitor atual, redimensiona os frames para a resolução escolhida e grava H.264 pelo Media Foundation. A próxima evolução troca a captura por Windows Graphics Capture com Direct3D 11 e conecta os frames diretamente ao NVENC ou AMD AMF, mantendo o Media Foundation como fallback.
+A captura usa Windows Graphics Capture, com redimensionamento pelo Direct3D 11. A proporção do monitor é preservada: resoluções diferentes recebem margens pretas quando necessário. O cursor é capturado pelo Windows.
+
+Os frames ainda são copiados para memória antes da codificação H.264 pelo Media Foundation. A seleção direta de NVENC/AMF e o envio de texturas ao encoder sem essa cópia são os próximos passos. Por enquanto, essas duas opções usam a seleção automática do Media Foundation e não garantem um fabricante específico.
+
+Se o monitor for desconectado, sua resolução mudar ou a GPU falhar, o app tenta finalizar o MP4 e informa o erro. É necessário iniciar uma nova gravação após a mudança. Conteúdo protegido pode não aparecer; HDR ainda não tem tratamento de cor dedicado.
 
 ## Compilando
 
 ### Requisitos
 
-- Windows 10 ou 11;
+- Windows 10 versão 1903 ou posterior, ou Windows 11;
 - Visual Studio com o workload **Desktop development with C++**;
 - Windows SDK;
 - CMake 3.25 ou mais recente;
@@ -69,6 +73,15 @@ O executável será criado em:
     build/Release/fast-record.exe
 
 O SDK do WebView2 é obtido pelo CMake durante a configuração.
+
+### Teste local da captura
+
+O teste captura o monitor principal duas vezes, com pausa e retomada, em modo software e automático. Execute em uma sessão desktop interativa. Os vídeos permanecem na pasta indicada para inspeção:
+
+    cmake --build build --config Debug --target capture-smoke
+    build\Debug\capture-smoke.exe build\capture-smoke-output
+
+Esse teste não roda no CI nem faz parte da build padrão.
 
 ## Releases
 
@@ -107,7 +120,7 @@ Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibli
 ## Próximos passos
 
 - [x] gravar o monitor atual em MP4/H.264;
-- [ ] migrar a captura para Windows Graphics Capture e Direct3D 11;
+- [x] migrar a captura para Windows Graphics Capture e Direct3D 11;
 - [ ] capturar microfone e áudio do sistema com WASAPI;
 - [ ] conectar NVENC e AMD AMF ao fluxo de frames;
 - [ ] implementar captura de janela e região;

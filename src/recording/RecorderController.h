@@ -33,6 +33,7 @@ public:
     OperationResult pause();
     OperationResult resume();
     OperationResult stop();
+    bool hasFinished() const noexcept { return isRecording() && !m_backend->running(); }
 
     bool isRecording() const noexcept {
         return m_state == RecorderState::Recording || m_state == RecorderState::Paused;

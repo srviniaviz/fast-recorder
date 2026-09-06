@@ -160,6 +160,7 @@ bool AppController::initialize() {
     }
 
     showMainWindow();
+    SetTimer(m_window, 1, 250, nullptr);
     return true;
 }
 
@@ -735,6 +736,11 @@ LRESULT AppController::handleMessage(
     }
 
     switch (message) {
+    case WM_TIMER:
+        if (wParam == 1 && m_recorder.hasFinished()) {
+            stopRecording();
+        }
+        return 0;
     case WM_CLOSE:
         ShowWindow(hwnd, SW_HIDE);
         return 0;

@@ -11,7 +11,7 @@ RecorderController::RecorderController()
 RecorderController::~RecorderController() = default;
 
 OperationResult RecorderController::start(const RecordingSettings& settings) {
-    if (m_state == RecorderState::Recording || m_state == RecorderState::Starting) {
+    if (m_state != RecorderState::Idle) {
         return {false, L"Já existe uma gravação em andamento."};
     }
 

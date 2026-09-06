@@ -1,0 +1,144 @@
+#include "recording/GraphicsCapture.h"
+
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <winrt/Windows.Foundation.h>
+#include <algorithm>
+#include <cstring>
+
+namespace fastrecord::recording {
+using namespace winrt;
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX;
+
+GraphicsCapture::GraphicsCapture(const RecordingSettings& settings)
+    : m_width(settings.width), m_height(settings.height) {
+    if (!GraphicsCaptureSession::IsSupported()) {
+        throw hresult_error(E_NOTIMPL, L"Windows Graphics Capture não está disponível neste Windows.");
+    }
+    check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, m_device.put(), nullptr, m_context.put()));
+    const auto dxgi = m_device.as<IDXGIDevice>();
+    com_ptr<IInspectable> inspectable;
+    check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), inspectable.put()));
+    m_runtimeDevice = inspectable.as<Direct3D11::IDirect3DDevice>();
+
+    const auto factory = get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+    const HMONITOR monitor = settings.target.monitor ? settings.target.monitor
+        : MonitorFromPoint(POINT{}, MONITOR_DEFAULTTOPRIMARY);
+    m_monitor = monitor;
+    check_hresult(factory->CreateForMonitor(monitor, guid_of<GraphicsCaptureItem>(), put_abi(m_item)));
+    m_size = m_item.Size();
+    if (m_size.Width <= 0 || m_size.Height <= 0) {
+        throw hresult_error(E_INVALIDARG, L"O monitor não possui uma área válida de captura.");
+    }
+
+    m_videoDevice = m_device.as<ID3D11VideoDevice>();
+    m_videoContext = m_context.as<ID3D11VideoContext>();
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputWidth = m_size.Width;
+    content.InputHeight = m_size.Height;
+    content.OutputWidth = m_width;
+    content.OutputHeight = m_height;
+    content.InputFrameRate = content.OutputFrameRate = {settings.framesPerSecond, 1};
+    content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    check_hresult(m_videoDevice->CreateVideoProcessorEnumerator(&content, m_enumerator.put()));
+    check_hresult(m_videoDevice->CreateVideoProcessor(m_enumerator.get(), 0, m_processor.put()));
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = m_width;
+    desc.Height = m_height;
+    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    check_hresult(m_device->CreateTexture2D(&desc, nullptr, m_output.put()));
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view{};
+    view.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    check_hresult(m_videoDevice->CreateVideoProcessorOutputView(
+        m_output.get(), m_enumerator.get(), &view, m_outputView.put()));
+    desc.BindFlags = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    check_hresult(m_device->CreateTexture2D(&desc, nullptr, m_staging.put()));
+
+    // Fit the entire monitor, preserving aspect ratio; uncovered pixels are black.
+    const double scale = std::min(static_cast<double>(m_width) / m_size.Width,
+        static_cast<double>(m_height) / m_size.Height);
+    const LONG fitWidth = static_cast<LONG>(m_size.Width * scale);
+    const LONG fitHeight = static_cast<LONG>(m_size.Height * scale);
+    const LONG left = (static_cast<LONG>(m_width) - fitWidth) / 2;
+    const LONG top = (static_cast<LONG>(m_height) - fitHeight) / 2;
+    const RECT source{0, 0, m_size.Width, m_size.Height};
+    const RECT destination{left, top, left + fitWidth, top + fitHeight};
+    const RECT target{0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height)};
+    D3D11_VIDEO_COLOR black{};
+    black.RGBA.A = 1.f;
+    m_videoContext->VideoProcessorSetOutputBackgroundColor(m_processor.get(), FALSE, &black);
+    m_videoContext->VideoProcessorSetOutputTargetRect(m_processor.get(), TRUE, &target);
+    m_videoContext->VideoProcessorSetStreamSourceRect(m_processor.get(), 0, TRUE, &source);
+    m_videoContext->VideoProcessorSetStreamDestRect(m_processor.get(), 0, TRUE, &destination);
+    m_videoContext->VideoProcessorSetStreamFrameFormat(m_processor.get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    m_videoContext->VideoProcessorSetStreamAutoProcessingMode(m_processor.get(), 0, FALSE);
+
+    m_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+        m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+    m_session = m_pool.CreateCaptureSession(m_item);
+    if (const auto options = m_session.try_as<IGraphicsCaptureSession2>()) {
+        options.IsCursorCaptureEnabled(settings.captureCursor);
+    }
+    m_session.StartCapture();
+}
+
+GraphicsCapture::~GraphicsCapture() {
+    try { if (m_session) m_session.Close(); } catch (...) {}
+    try { if (m_pool) m_pool.Close(); } catch (...) {}
+}
+
+bool GraphicsCapture::read(std::vector<BYTE>& pixels) {
+    check_hresult(m_device->GetDeviceRemovedReason());
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(m_monitor, &info) ||
+        info.rcMonitor.right - info.rcMonitor.left != m_size.Width ||
+        info.rcMonitor.bottom - info.rcMonitor.top != m_size.Height) {
+        throw hresult_error(E_ABORT, L"O monitor foi desconectado ou teve sua resolução alterada.");
+    }
+    // Drain only the bounded pool. A static desktop can legitimately produce no frames.
+    auto frame = m_pool.TryGetNextFrame();
+    if (!frame) return false;
+    if (auto newer = m_pool.TryGetNextFrame()) {
+        frame.Close();
+        frame = std::move(newer);
+    }
+    const auto size = frame.ContentSize();
+    if (size.Width != m_size.Width || size.Height != m_size.Height) {
+        throw hresult_error(E_ABORT, L"A resolução do monitor mudou. Inicie uma nova gravação.");
+    }
+    const auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+    com_ptr<ID3D11Texture2D> texture;
+    check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
+    inputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    com_ptr<ID3D11VideoProcessorInputView> input;
+    check_hresult(m_videoDevice->CreateVideoProcessorInputView(
+        texture.get(), m_enumerator.get(), &inputDesc, input.put()));
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.pInputSurface = input.get();
+    check_hresult(m_videoContext->VideoProcessorBlt(m_processor.get(), m_outputView.get(), 0, 1, &stream));
+    m_context->CopyResource(m_staging.get(), m_output.get());
+    pixels.resize(static_cast<size_t>(m_width) * m_height * 4);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    check_hresult(m_context->Map(m_staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    for (UINT y = 0; y < m_height; ++y) {
+        std::memcpy(pixels.data() + static_cast<size_t>(y) * m_width * 4,
+            static_cast<const BYTE*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch,
+            static_cast<size_t>(m_width) * 4);
+    }
+    m_context->Unmap(m_staging.get(), 0);
+    frame.Close();
+    return true;
+}
+} // namespace fastrecord::recording

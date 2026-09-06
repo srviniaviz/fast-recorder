@@ -49,6 +49,7 @@ public:
     virtual bool resume(std::wstring& error) = 0;
     virtual bool stop(std::wstring& error) = 0;
     virtual std::filesystem::path outputPath() const = 0;
+    virtual bool running() const noexcept = 0;
 };
 
 } // namespace fastrecord::recording

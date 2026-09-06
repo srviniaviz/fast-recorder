@@ -1,7 +1,9 @@
 #include "recording/MediaFoundationBackend.h"
+#include "recording/GraphicsCapture.h"
 
 #include <Windows.h>
 #include <mfapi.h>
+#include <roapi.h>
 #include <mferror.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -20,6 +22,24 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr LONGLONG kHundredNanosecondsPerSecond = 10'000'000;
+
+struct MediaRuntime {
+    MediaRuntime() {
+        winrt::check_hresult(RoInitialize(RO_INIT_MULTITHREADED));
+        const HRESULT result = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+        if (FAILED(result)) {
+            RoUninitialize();
+            winrt::check_hresult(result);
+        }
+    }
+    ~MediaRuntime() {
+        // This worker owns the last WinRT apartment in the standalone recorder.
+        // Release cached activation factories before Windows unloads their modules.
+        winrt::clear_factory_cache();
+        MFShutdown();
+        RoUninitialize();
+    }
+};
 
 std::wstring hresultMessage(const wchar_t* operation, HRESULT result) {
     wchar_t buffer[96]{};
@@ -45,36 +65,6 @@ std::filesystem::path createOutputPath(const std::filesystem::path& directory) {
     return directory / name;
 }
 
-void drawCursor(HDC target, const RECT& source, std::uint32_t width, std::uint32_t height) {
-    CURSORINFO cursor{};
-    cursor.cbSize = sizeof(cursor);
-    if (!GetCursorInfo(&cursor) || (cursor.flags & CURSOR_SHOWING) == 0 || cursor.hCursor == nullptr) {
-        return;
-    }
-
-    ICONINFO icon{};
-    if (!GetIconInfo(cursor.hCursor, &icon)) {
-        return;
-    }
-
-    const int sourceWidth = std::max(1L, source.right - source.left);
-    const int sourceHeight = std::max(1L, source.bottom - source.top);
-    const int x = static_cast<int>(
-        (cursor.ptScreenPos.x - source.left - static_cast<LONG>(icon.xHotspot)) *
-        static_cast<double>(width) / sourceWidth);
-    const int y = static_cast<int>(
-        (cursor.ptScreenPos.y - source.top - static_cast<LONG>(icon.yHotspot)) *
-        static_cast<double>(height) / sourceHeight);
-
-    DrawIconEx(target, x, y, cursor.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
-    if (icon.hbmColor != nullptr) {
-        DeleteObject(icon.hbmColor);
-    }
-    if (icon.hbmMask != nullptr) {
-        DeleteObject(icon.hbmMask);
-    }
-}
-
 } // namespace
 
 MediaFoundationBackend::~MediaFoundationBackend() {
@@ -87,8 +77,12 @@ bool MediaFoundationBackend::start(const RecordingSettings& settings, std::wstri
         error = L"Já existe uma captura em andamento.";
         return false;
     }
-    if (settings.outputDirectory.empty() || settings.width == 0 || settings.height == 0 ||
-        settings.framesPerSecond == 0) {
+    if (settings.outputDirectory.empty() || settings.width < 2 || settings.height < 2 ||
+        settings.width > 3840 || settings.height > 2160 ||
+        (settings.width % 2) != 0 || (settings.height % 2) != 0 ||
+        settings.framesPerSecond == 0 || settings.framesPerSecond > 120 ||
+        settings.bitrateMbps < 4 || settings.bitrateMbps > 80 ||
+        settings.target.kind == CaptureTargetKind::SelectedWindow) {
         error = L"As configurações da gravação são inválidas.";
         return false;
     }
@@ -110,13 +104,24 @@ bool MediaFoundationBackend::start(const RecordingSettings& settings, std::wstri
 
     std::promise<std::wstring> startupResult;
     auto startupFuture = startupResult.get_future();
-    m_worker = std::thread(
-        &MediaFoundationBackend::recordLoop,
-        this,
-        settings,
-        std::move(startupResult));
-
-    error = startupFuture.get();
+    try {
+        m_worker = std::thread([this, settings, promise = std::move(startupResult)]() mutable {
+            try {
+                recordLoop(settings, std::move(promise));
+            } catch (const winrt::hresult_error& failure) {
+                setWorkerError(failure.message().c_str());
+            } catch (...) {
+                setWorkerError(L"Falha inesperada na captura de vídeo.");
+            }
+            m_running = false;
+        });
+        error = startupFuture.get();
+    } catch (...) {
+        if (m_worker.joinable()) m_worker.join();
+        std::scoped_lock lock(m_mutex);
+        error = m_workerError.empty() ? L"Não foi possível iniciar a captura." : m_workerError;
+        return false;
+    }
     if (!error.empty()) {
         if (m_worker.joinable()) {
             m_worker.join();
@@ -180,86 +185,29 @@ void MediaFoundationBackend::recordLoop(
         }
     };
 
-    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool comInitialized = SUCCEEDED(comResult);
-    if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE) {
-        reportStartup(hresultMessage(L"Falha ao inicializar COM", comResult));
-        return;
-    }
+    MediaRuntime runtime;
 
-    const HRESULT mfResult = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-    if (FAILED(mfResult)) {
-        reportStartup(hresultMessage(L"Falha ao iniciar o Media Foundation", mfResult));
-        if (comInitialized) {
-            CoUninitialize();
-        }
-        return;
-    }
-
-    HMONITOR monitor = settings.target.monitor;
-    if (monitor == nullptr) {
-        POINT origin{};
-        monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
-    }
-
-    MONITORINFO monitorInfo{};
-    monitorInfo.cbSize = sizeof(monitorInfo);
-    if (monitor == nullptr || !GetMonitorInfoW(monitor, &monitorInfo)) {
-        reportStartup(L"Não foi possível localizar o monitor que será gravado.");
-        MFShutdown();
-        if (comInitialized) {
-            CoUninitialize();
-        }
-        return;
-    }
-
-    const RECT source = monitorInfo.rcMonitor;
-    const auto width = settings.width & ~1u;
-    const auto height = settings.height & ~1u;
-    const auto fps = std::clamp(settings.framesPerSecond, 1u, 120u);
-    const auto bitrate = std::clamp(settings.bitrateMbps, 4u, 100u) * 1'000'000u;
+    const auto width = settings.width;
+    const auto height = settings.height;
+    const auto fps = settings.framesPerSecond;
+    const auto bitrate = settings.bitrateMbps * 1'000'000u;
     const DWORD frameBytes = width * height * 4u;
-
-    HDC screen = GetDC(nullptr);
-    HDC frameDc = screen != nullptr ? CreateCompatibleDC(screen) : nullptr;
-    void* pixels = nullptr;
-    BITMAPINFO bitmapInfo{};
-    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmapInfo.bmiHeader.biWidth = static_cast<LONG>(width);
-    bitmapInfo.bmiHeader.biHeight = -static_cast<LONG>(height);
-    bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 32;
-    bitmapInfo.bmiHeader.biCompression = BI_RGB;
-    HBITMAP frameBitmap = frameDc != nullptr
-        ? CreateDIBSection(frameDc, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0)
-        : nullptr;
-    HGDIOBJ previousBitmap = frameBitmap != nullptr ? SelectObject(frameDc, frameBitmap) : nullptr;
-
-    const auto releaseGraphics = [&]() {
-        if (frameDc != nullptr && previousBitmap != nullptr) {
-            SelectObject(frameDc, previousBitmap);
+    std::unique_ptr<GraphicsCapture> capture;
+    std::vector<BYTE> pixels;
+    try {
+        capture = std::make_unique<GraphicsCapture>(settings);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!capture->read(pixels)) {
+            if (m_stopRequested || std::chrono::steady_clock::now() >= deadline) {
+                throw winrt::hresult_error(E_ABORT, L"O Windows não entregou frames do monitor.");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (frameBitmap != nullptr) {
-            DeleteObject(frameBitmap);
-        }
-        if (frameDc != nullptr) {
-            DeleteDC(frameDc);
-        }
-        if (screen != nullptr) {
-            ReleaseDC(nullptr, screen);
-        }
-    };
-
-    if (screen == nullptr || frameDc == nullptr || frameBitmap == nullptr || pixels == nullptr) {
-        reportStartup(L"Não foi possível preparar a superfície de captura.");
-        releaseGraphics();
-        MFShutdown();
-        if (comInitialized) {
-            CoUninitialize();
-        }
+    } catch (const winrt::hresult_error& failure) {
+        reportStartup(failure.message().c_str());
+        capture.reset();
         return;
     }
-    SetStretchBltMode(frameDc, HALFTONE);
 
     ComPtr<IMFAttributes> attributes;
     HRESULT result = MFCreateAttributes(&attributes, 2);
@@ -343,11 +291,11 @@ void MediaFoundationBackend::recordLoop(
 
     if (FAILED(result)) {
         reportStartup(hresultMessage(L"Não foi possível iniciar o encoder H.264", result));
-        releaseGraphics();
-        MFShutdown();
-        if (comInitialized) {
-            CoUninitialize();
-        }
+        writer.Reset();
+        inputType.Reset();
+        outputType.Reset();
+        attributes.Reset();
+        capture.reset();
         return;
     }
 
@@ -366,25 +314,11 @@ void MediaFoundationBackend::recordLoop(
             continue;
         }
 
-        const int sourceWidth = source.right - source.left;
-        const int sourceHeight = source.bottom - source.top;
-        if (!StretchBlt(
-                frameDc,
-                0,
-                0,
-                static_cast<int>(width),
-                static_cast<int>(height),
-                screen,
-                source.left,
-                source.top,
-                sourceWidth,
-                sourceHeight,
-                SRCCOPY | CAPTUREBLT)) {
-            writeResult = HRESULT_FROM_WIN32(GetLastError());
+        try {
+            capture->read(pixels); // Repeat the last frame when the desktop is static.
+        } catch (const winrt::hresult_error& failure) {
+            setWorkerError(failure.message().c_str());
             break;
-        }
-        if (settings.captureCursor) {
-            drawCursor(frameDc, source, width, height);
         }
 
         ComPtr<IMFMediaBuffer> buffer;
@@ -394,7 +328,7 @@ void MediaFoundationBackend::recordLoop(
             writeResult = buffer->Lock(&destination, nullptr, nullptr);
         }
         if (SUCCEEDED(writeResult)) {
-            std::memcpy(destination, pixels, frameBytes);
+            std::memcpy(destination, pixels.data(), frameBytes);
             buffer->Unlock();
             destination = nullptr;
             writeResult = buffer->SetCurrentLength(frameBytes);
@@ -441,11 +375,11 @@ void MediaFoundationBackend::recordLoop(
     }
 
     m_running = false;
-    releaseGraphics();
-    MFShutdown();
-    if (comInitialized) {
-        CoUninitialize();
-    }
+    writer.Reset();
+    inputType.Reset();
+    outputType.Reset();
+    attributes.Reset();
+    capture.reset();
 }
 
 } // namespace fastrecord::recording

@@ -22,6 +22,7 @@ public:
     bool resume(std::wstring& error) override;
     bool stop(std::wstring& error) override;
     std::filesystem::path outputPath() const override;
+    bool running() const noexcept override { return m_running.load(); }
 
 private:
     void recordLoop(RecordingSettings settings, std::promise<std::wstring> startupResult);
