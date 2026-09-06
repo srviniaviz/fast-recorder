@@ -2,6 +2,21 @@ cmake_minimum_required(VERSION 3.25)
 
 project(FastRecord VERSION 0.1.0 LANGUAGES CXX)
 
+set(FASTRECORD_VERSION "${PROJECT_VERSION}" CACHE STRING "Version shown by the app and installer")
+set(FASTRECORD_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${FASTRECORD_GENERATED_DIR}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/BuildVersion.h.in"
+    "${FASTRECORD_GENERATED_DIR}/BuildVersion.h"
+    @ONLY
+)
+set(FASTRECORD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/fast-record-icon.ico")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/FastRecord.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc"
+    @ONLY
+)
+
 include(FetchContent)
 
 set(FASTRECORD_WEBVIEW2_VERSION "1.0.4191.47" CACHE STRING "WebView2 SDK version")
@@ -24,12 +39,13 @@ add_executable(fast-record WIN32
     src/recording/AmfProbe.cpp
     src/recording/NvencProbe.cpp
     src/recording/RecorderController.cpp
-    src/resources/FastRecord.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc
     src/ui/WebViewHost.cpp
 )
 
 target_include_directories(fast-record PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${FASTRECORD_GENERATED_DIR}
     ${webview2_SOURCE_DIR}/build/native/include
 )
 

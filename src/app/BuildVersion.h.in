@@ -1,0 +1,3 @@
+#pragma once
+
+#define FASTRECORD_VERSION L"@FASTRECORD_VERSION@"

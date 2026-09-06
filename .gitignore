@@ -2,6 +2,8 @@
 /build-next/
 /build-latest/
 /build-webview/
+/build-ci/
+/dist/
 /out/
 /.vs/
 *.user

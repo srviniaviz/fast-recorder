@@ -24,7 +24,7 @@ body.recording .record .orb{animation:pulse 1.5s infinite}@keyframes pulse{50%{b
 </head>
 <body>
 <main class="app">
-<header class="header" id="dragbar"><div class="brand"><span class="mark"></span><span class="name">Fast Record</span><span class="version">v0.1.0</span></div><div class="window-actions"><button class="icon-btn" id="pin" aria-label="Manter no topo"><svg class="icon"><use href="#i-pin"/></svg></button><button class="icon-btn" data-message="minimize" aria-label="Minimizar"><svg class="icon"><use href="#i-minus"/></svg></button><button class="icon-btn" data-message="hide" aria-label="Fechar para a bandeja"><svg class="icon"><use href="#i-close"/></svg></button></div></header>
+<header class="header" id="dragbar"><div class="brand"><span class="mark"></span><span class="name">Fast Record</span><span class="version">v__FASTRECORD_VERSION__</span></div><div class="window-actions"><button class="icon-btn" id="pin" aria-label="Manter no topo"><svg class="icon"><use href="#i-pin"/></svg></button><button class="icon-btn" data-message="minimize" aria-label="Minimizar"><svg class="icon"><use href="#i-minus"/></svg></button><button class="icon-btn" data-message="hide" aria-label="Fechar para a bandeja"><svg class="icon"><use href="#i-close"/></svg></button></div></header>
 <section class="actions">
 <button class="action record" id="record"><span class="orb"><span class="record-dot"></span></span><span class="action-title">Gravar tela</span><span class="shortcut">Ctrl + Shift + R</span></button>
 <button class="action" id="pause" disabled><span class="orb"><span class="pause-glyph"><i></i><i></i></span></span><span class="action-title">Pausar</span><span class="shortcut">Ctrl + P</span></button>

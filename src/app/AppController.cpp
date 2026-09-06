@@ -1,6 +1,7 @@
 #include "app/AppController.h"
 
 #include "app/AppSettings.h"
+#include "BuildVersion.h"
 #include "resources/resource.h"
 
 #include "ui/AppPage.h"
@@ -13,6 +14,7 @@
 #include <cwchar>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace fastrecord {
 
@@ -131,9 +133,16 @@ bool AppController::initialize() {
             NIIF_WARNING);
     }
 
+    std::wstring appPage(ui::kAppPage);
+    const std::wstring versionToken = L"__FASTRECORD_VERSION__";
+    const size_t versionPosition = appPage.find(versionToken);
+    if (versionPosition != std::wstring::npos) {
+        appPage.replace(versionPosition, versionToken.size(), FASTRECORD_VERSION);
+    }
+
     const bool webViewStarted = m_webView.initialize(
         m_window,
-        ui::kAppPage,
+        std::move(appPage),
         [this](const std::wstring& message) { handleWebMessage(message); },
         [this](bool ready) {
             if (!ready) {
@@ -628,7 +637,8 @@ void AppController::openRecordingsFolder() {
 
 void AppController::showAboutDialog() {
     const std::wstring message =
-        L"Fast Record 0.1.0\n\nGravador rápido de tela para Windows.\n\n" +
+        std::wstring(L"Fast Record ") + FASTRECORD_VERSION +
+        L"\n\nGravador rápido de tela para Windows.\n\n" +
         m_nvencProbe.description + L"\n" + m_amfProbe.description;
     MessageBoxW(m_window, message.c_str(), L"Sobre o Fast Record", MB_OK | MB_ICONINFORMATION);
 }

@@ -1,0 +1,94 @@
+name: Build and publish release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fast-record-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "0.1.${{ github.run_number }}"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Enable MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cmake -S . -B build-ci -A x64 "-DFASTRECORD_VERSION=$env:APP_VERSION"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build-ci --config Release --parallel
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress --yes
+
+      - name: Package installer and portable zip
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item build-ci\Release\fast-record.exe "dist\FastRecord-$env:APP_VERSION-x64.exe"
+          Compress-Archive -Path build-ci\Release\fast-record.exe -DestinationPath "dist\FastRecord-$env:APP_VERSION-x64.zip"
+          & makensis.exe "/DAPP_VERSION=$env:APP_VERSION" installer\FastRecord.nsi
+
+      - name: Create release tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags origin
+          git show-ref --tags --verify --quiet "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+            git tag --annotate $env:RELEASE_TAG --message "Fast Record $env:RELEASE_TAG"
+            git push origin $env:RELEASE_TAG
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $setup = "dist\FastRecord-$env:APP_VERSION-x64-Setup.exe"
+          $portable = "dist\FastRecord-$env:APP_VERSION-x64.zip"
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $setup $portable --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $setup $portable --title "Fast Record $env:RELEASE_TAG" --generate-notes --latest
+          }
+

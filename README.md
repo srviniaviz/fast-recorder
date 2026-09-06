@@ -69,6 +69,21 @@ O executável será criado em:
 
 O SDK do WebView2 é obtido pelo CMake durante a configuração.
 
+## Releases
+
+Todo push na branch `main` dispara o workflow de release. A versão é criada a
+partir do número da execução, seguindo o formato `v0.1.<build>`; assim, cada
+commit publicado recebe uma tag própria e não sobrescreve uma versão anterior.
+
+Cada release publicado no GitHub contém:
+
+- `FastRecord-v0.1.<build>-x64-Setup.exe`, instalador por usuário;
+- `FastRecord-v0.1.<build>-x64.zip`, versão portátil.
+
+O instalador cria atalhos no Menu Iniciar e na área de trabalho, registra o
+desinstalador e não precisa de privilégios de administrador. O Microsoft Edge
+WebView2 Runtime continua sendo um requisito do Windows.
+
 ### Sonda completa do NVENC
 
     cmake -S . -B build -A x64 -DFASTRECORD_NVENC_SDK_DIR="C:\SDKs\Video_Codec_SDK"
@@ -101,4 +116,3 @@ Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibli
 ## Licença
 
 Ainda não há uma licença definida. Enquanto isso, o código permanece com todos os direitos reservados.
-
