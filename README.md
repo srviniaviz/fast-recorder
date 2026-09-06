@@ -11,7 +11,7 @@
 O Fast Record vive na bandeja do sistema e abre um painel compacto quando você precisa dele. A ideia é simples: escolher a fonte, ajustar a qualidade e começar a captura sem atravessar assistentes ou telas desnecessárias.
 
 > [!IMPORTANT]
-> O projeto está em desenvolvimento. Captura de tela, janela ou região e áudio em MP4 já funcionam; webcam e o backend direto AMD AMF ainda estão em implementação.
+> O projeto está em desenvolvimento. Captura de tela, janela ou região, áudio em MP4 e os backends NVENC/AMF já estão conectados; webcam ainda está em espera.
 
 ## O que já está pronto
 
@@ -22,6 +22,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - opção de AV1 em MP4 quando o NVENC da NVIDIA anuncia suporte ao codec;
 - codificação por software ou seleção automática do Media Foundation;
 - codificação direta por NVENC quando a GPU NVIDIA compatível está disponível;
+- codificação direta por AMD AMF em H.264 quando o driver AMD oferece `amfrt64.dll`;
 - microfone e áudio do PC mixados em AAC estéreo, inclusive com NVENC H.264/AV1;
 - captura de tela inteira, janela ou região selecionada;
 - histórico local com duração, data, tamanho, reprodução e acesso pelo Explorer;
@@ -50,13 +51,13 @@ A janela é nativa em C++, com a camada visual renderizada pelo WebView2. Isso m
     RecorderController
         ┌───┴──────────────┐
         ▼                  ▼
-   NVENC direto       Media Foundation
-   MP4 / H.264/AV1    MP4 / H.264
+   NVENC direto       AMD AMF          Media Foundation
+   MP4 / H.264/AV1    MP4 / H.264      MP4 / H.264
         └──── WASAPI + AAC ────┘
 
 A captura usa Windows Graphics Capture, com redimensionamento pelo Direct3D 11. A proporção do monitor é preservada: resoluções diferentes recebem margens pretas quando necessário. O cursor é capturado pelo Windows.
 
-No modo software/automático, os frames são copiados para memória antes da codificação H.264 pelo Media Foundation. No modo NVENC, a textura D3D11 da captura vai direto para o encoder da NVIDIA e o pacote H.264 ou AV1 é muxado em MP4 localmente. Quando o microfone ou o áudio do PC está ativo, o WASAPI captura as fontes selecionadas, faz a mistura e adiciona uma faixa AAC estéreo de 48 kHz ao mesmo arquivo. AV1 precisa ser usado com **NVENC** selecionado; o backend AMD AMF continua em espera para esta etapa.
+No modo software/automático, os frames são copiados para memória antes da codificação H.264 pelo Media Foundation. No modo NVENC, a textura D3D11 da captura vai direto para o encoder da NVIDIA e o pacote H.264 ou AV1 é muxado em MP4 localmente. No modo AMF, o frame é convertido para NV12 e enviado ao encoder AMD pelo runtime carregado em tempo de execução; a saída H.264 é entregue ao contêiner MP4 do Windows. Quando o microfone ou o áudio do PC está ativo, o WASAPI captura as fontes selecionadas, faz a mistura e adiciona uma faixa AAC estéreo de 48 kHz ao mesmo arquivo. AV1 continua reservado ao **NVENC** nesta versão; o backend AMF começa com H.264 para manter uma combinação compatível com mais gerações de GPU AMD.
 
 Se o monitor for desconectado, sua resolução mudar ou a GPU falhar, o app tenta finalizar o MP4 e informa o erro. É necessário iniciar uma nova gravação após a mudança. Conteúdo protegido pode não aparecer; HDR ainda não tem tratamento de cor dedicado.
 
@@ -90,6 +91,18 @@ O teste captura o monitor principal duas vezes, com pausa e retomada, em modo so
 
 Esse teste não roda no CI nem faz parte da build padrão.
 
+### Testes automatizados
+
+Depois de configurar e compilar o projeto, rode a suíte determinística com:
+
+    ctest --test-dir build -C Release --output-on-failure
+
+Ela verifica as preferências salvas no Registro, os estados e erros do
+gravador, o contrato da interface, as regras do áudio e as sondas de NVENC e
+AMF. Os testes `capture-smoke` e `nvenc-smoke` continuam separados porque
+precisam de uma sessão gráfica, dispositivos de áudio e, no caso do NVENC,
+uma GPU NVIDIA compatível.
+
 ## Releases
 
 Todo push na branch `main` dispara o workflow de release. A versão é criada a
@@ -122,11 +135,23 @@ funciona em uma GPU NVIDIA cujo driver anuncia AV1:
 
     build\Debug\nvenc-smoke.exe build\nvenc-smoke-output-av1 av1
 
-### Sonda completa do AMD AMF
+### AMD AMF
 
     cmake -S . -B build -A x64 -DFASTRECORD_AMF_SDK_DIR="C:\SDKs\AMF"
 
-Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibliotecas dos drivers estão instaladas e mantém a opção de software como fallback.
+Os headers oficiais do AMF são baixados e fixados automaticamente quando o SDK
+local não existe. O runtime não é empacotado: o app procura
+`amfrt64.dll`/`amfrtlt64.dll` instalado pelo driver AMD. Sem uma GPU ou driver
+AMD, a sonda informa a ausência da DLL e a seleção AMF falha com uma mensagem
+clara; os modos automático, software e NVENC continuam independentes.
+
+Para testar só o carregamento e o diagnóstico do runtime:
+
+    build\Release\fast-record-tests.exe
+
+O teste não finge uma GPU AMD. Em uma máquina sem AMD ele valida justamente o
+caminho de ausência da DLL; a codificação AMF efetiva precisa ser exercitada
+em uma máquina com uma GPU AMD compatível.
 
 ## Estrutura
 
@@ -144,7 +169,8 @@ Os SDKs são opcionais. Sem os headers, o Fast Record ainda verifica se as bibli
 - [x] capturar e mixar microfone e áudio do sistema com WASAPI;
 - [x] conectar NVENC ao fluxo de frames;
 - [x] adicionar escolha de codec H.264/AV1 ao NVENC;
-- [ ] conectar AMD AMF ao fluxo de frames;
+- [x] conectar AMD AMF H.264 ao fluxo de frames;
+- [ ] adicionar AV1 ao backend AMD AMF;
 - [x] implementar captura de janela e região;
 - [x] listar e reproduzir gravações recentes;
 - [x] empacotar versões automaticamente pelo GitHub Actions.

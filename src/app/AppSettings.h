@@ -18,7 +18,11 @@ struct AppSettings {
     bool alwaysOnTop{false};
 };
 
-AppSettings loadAppSettings();
-bool saveAppSettings(const AppSettings& settings);
+// The optional registry path keeps the production key stable while allowing
+// isolated round-trip tests to use their own temporary key.
+AppSettings loadAppSettings(const std::wstring& registryPath = L"Software\\Fast Record");
+bool saveAppSettings(
+    const AppSettings& settings,
+    const std::wstring& registryPath = L"Software\\Fast Record");
 
 } // namespace fastrecord

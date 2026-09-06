@@ -38,6 +38,7 @@ add_executable(fast-record WIN32
     src/app/AppSettings.cpp
     src/platform/CaptureSelector.cpp
     src/platform/TrayIcon.cpp
+    src/recording/AmfBackend.cpp
     src/recording/AmfProbe.cpp
     src/recording/AudioCapture.cpp
     src/recording/MediaFoundationBackend.cpp
@@ -175,6 +176,10 @@ target_link_libraries(nvenc-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite
 # AMF is also optional. The headers are used at build time; the AMD runtime is
 # loaded from the installed display driver at runtime.
 set(FASTRECORD_AMF_SDK_DIR "" CACHE PATH "AMD Advanced Media Framework SDK directory")
+option(FASTRECORD_FETCH_AMF_HEADERS
+    "Fetch pinned AMD AMF headers when the local SDK is not installed"
+    ON
+)
 find_path(FASTRECORD_AMF_INCLUDE_DIR
     NAMES core/Factory.h
     HINTS
@@ -183,9 +188,106 @@ find_path(FASTRECORD_AMF_INCLUDE_DIR
     PATH_SUFFIXES amf/public/include public/include
 )
 
+if(NOT FASTRECORD_AMF_INCLUDE_DIR AND FASTRECORD_FETCH_AMF_HEADERS)
+    # AMF is a header-only SDK at build time. The runtime encoder is loaded
+    # from the AMD display driver at runtime and is never bundled with the app.
+    FetchContent_Declare(
+        amf_headers
+        URL https://github.com/GPUOpen-LibrariesAndSDKs/AMF/archive/c35f613aea2e5057a688c979e75b1cf24253297e.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_Populate(amf_headers)
+    find_path(FASTRECORD_AMF_INCLUDE_DIR
+        NAMES core/Factory.h
+        HINTS "${amf_headers_SOURCE_DIR}"
+        PATH_SUFFIXES amf/public/include public/include
+        NO_DEFAULT_PATH
+    )
+    if(NOT FASTRECORD_AMF_INCLUDE_DIR)
+        # GitHub archives may keep their commit-named top-level directory.
+        file(GLOB_RECURSE FASTRECORD_AMF_FACTORY_HEADERS
+            "${amf_headers_SOURCE_DIR}/core/Factory.h"
+            "${amf_headers_SOURCE_DIR}/*/core/Factory.h"
+        )
+        if(FASTRECORD_AMF_FACTORY_HEADERS)
+            list(GET FASTRECORD_AMF_FACTORY_HEADERS 0 FASTRECORD_AMF_FACTORY_HEADER)
+            get_filename_component(FASTRECORD_AMF_CORE_DIR
+                "${FASTRECORD_AMF_FACTORY_HEADER}" DIRECTORY)
+            get_filename_component(FASTRECORD_AMF_INCLUDE_DIR
+                "${FASTRECORD_AMF_CORE_DIR}" DIRECTORY)
+        endif()
+    endif()
+    if(FASTRECORD_AMF_INCLUDE_DIR)
+        set(FASTRECORD_AMF_INCLUDE_DIR
+            "${FASTRECORD_AMF_INCLUDE_DIR}"
+            CACHE PATH "AMD AMF include directory"
+            FORCE
+        )
+    endif()
+endif()
+
 if(FASTRECORD_AMF_INCLUDE_DIR)
     target_include_directories(fast-record PRIVATE ${FASTRECORD_AMF_INCLUDE_DIR})
     target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_AMF=1)
 else()
     target_compile_definitions(fast-record PRIVATE FASTRECORD_HAS_AMF=0)
 endif()
+
+if(FASTRECORD_AMF_INCLUDE_DIR)
+    set(FASTRECORD_HAS_AMF 1)
+else()
+    set(FASTRECORD_HAS_AMF 0)
+endif()
+
+enable_testing()
+
+add_executable(fast-record-tests
+    tests/FastRecordUnitTests.cpp
+    src/app/AppSettings.cpp
+    src/recording/AmfBackend.cpp
+    src/recording/AmfProbe.cpp
+    src/recording/AudioCapture.cpp
+    src/recording/GraphicsCapture.cpp
+    src/recording/MediaFoundationBackend.cpp
+    src/recording/NvencBackend.cpp
+    src/recording/NvencProbe.cpp
+    src/recording/RecorderController.cpp
+)
+target_include_directories(fast-record-tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+if(FASTRECORD_NVENC_INCLUDE_DIR)
+    target_include_directories(fast-record-tests PRIVATE ${FASTRECORD_NVENC_INCLUDE_DIR})
+endif()
+if(FASTRECORD_AMF_INCLUDE_DIR)
+    target_include_directories(fast-record-tests PRIVATE ${FASTRECORD_AMF_INCLUDE_DIR})
+endif()
+target_compile_definitions(fast-record-tests PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WIN32_WINNT=0x0A00
+    FASTRECORD_HAS_NVENC=${FASTRECORD_HAS_NVENC}
+    FASTRECORD_HAS_AMF=${FASTRECORD_HAS_AMF}
+)
+if(MSVC)
+    target_compile_options(fast-record-tests PRIVATE /W4 /permissive- /utf-8)
+endif()
+target_link_libraries(fast-record-tests PRIVATE
+    d3d11
+    windowsapp
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
+    ole32
+    oleaut32
+    propsys
+    shell32
+    shlwapi
+    user32
+    version
+    wmcodecdspuuid
+)
+add_test(NAME fast-record-unit COMMAND fast-record-tests)

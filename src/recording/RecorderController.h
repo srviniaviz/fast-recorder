@@ -3,6 +3,7 @@
 #include "recording/RecordingBackend.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -23,7 +24,9 @@ struct OperationResult {
 
 class RecorderController final {
 public:
-    RecorderController();
+    using BackendFactory = std::function<std::unique_ptr<IRecordingBackend>(EncoderEngine)>;
+
+    explicit RecorderController(BackendFactory backendFactory = {});
     ~RecorderController();
 
     RecorderController(const RecorderController&) = delete;
@@ -33,7 +36,9 @@ public:
     OperationResult pause();
     OperationResult resume();
     OperationResult stop();
-    bool hasFinished() const noexcept { return isRecording() && !m_backend->running(); }
+    bool hasFinished() const noexcept {
+        return isRecording() && m_backend != nullptr && !m_backend->running();
+    }
 
     bool isRecording() const noexcept {
         return m_state == RecorderState::Recording || m_state == RecorderState::Paused;
@@ -51,6 +56,7 @@ private:
     EncoderEngine m_engine{EncoderEngine::Automatic};
     std::wstring m_lastError;
     std::unique_ptr<IRecordingBackend> m_backend;
+    BackendFactory m_backendFactory;
 };
 
 } // namespace fastrecord::recording

@@ -750,7 +750,7 @@ std::wstring AppController::codecValue() const {
 std::wstring AppController::selectedEngineStatus() const {
     const wchar_t* codec = m_codec == recording::VideoCodec::Av1 ? L"AV1" : L"H.264";
     if (m_codec == recording::VideoCodec::Av1 && m_recorder.engine() != recording::EncoderEngine::Nvenc) {
-        return L"AV1 nesta versão exige selecionar o encoder NVENC.";
+        return L"AV1 nesta versão exige selecionar um encoder NVENC compatível.";
     }
 
     switch (m_recorder.engine()) {
@@ -762,7 +762,7 @@ std::wstring AppController::selectedEngineStatus() const {
             L" A gravação atual usa o backend direto NVENC com " + codec + L".";
     case recording::EncoderEngine::Amf:
         return m_amfProbe.description +
-            L" A gravação atual usa a seleção de hardware do Media Foundation.";
+            L" A gravação atual usa o backend direto AMD AMF para H.264.";
     case recording::EncoderEngine::Software:
         return std::wstring(L"Compatível com qualquer GPU; utiliza a CPU para ") + codec + L".";
     default:

@@ -8,8 +8,6 @@ namespace fastrecord {
 
 namespace {
 
-constexpr wchar_t kSettingsKey[] = L"Software\\Fast Record";
-
 DWORD readDword(HKEY key, const wchar_t* name, DWORD fallback) {
     DWORD value = fallback;
     DWORD size = sizeof(value);
@@ -72,10 +70,10 @@ bool isValidFrameRate(int framesPerSecond) {
 
 } // namespace
 
-AppSettings loadAppSettings() {
+AppSettings loadAppSettings(const std::wstring& registryPath) {
     AppSettings settings;
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, registryPath.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
         return settings;
     }
 
@@ -116,11 +114,11 @@ AppSettings loadAppSettings() {
     return settings;
 }
 
-bool saveAppSettings(const AppSettings& settings) {
+bool saveAppSettings(const AppSettings& settings, const std::wstring& registryPath) {
     HKEY key = nullptr;
     if (RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            kSettingsKey,
+            registryPath.c_str(),
             0,
             nullptr,
             REG_OPTION_NON_VOLATILE,
