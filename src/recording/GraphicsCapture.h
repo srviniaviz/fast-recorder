@@ -15,7 +15,9 @@ public:
     ~GraphicsCapture();
     GraphicsCapture(const GraphicsCapture&) = delete;
     GraphicsCapture& operator=(const GraphicsCapture&) = delete;
+    bool update();
     bool read(std::vector<BYTE>& pixels);
+    ID3D11Device* device() const noexcept { return m_device.get(); }
 
 private:
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem m_item{nullptr};

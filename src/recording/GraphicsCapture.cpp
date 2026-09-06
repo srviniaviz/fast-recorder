@@ -58,10 +58,11 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings)
     view.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
     check_hresult(m_videoDevice->CreateVideoProcessorOutputView(
         m_output.get(), m_enumerator.get(), &view, m_outputView.put()));
-    desc.BindFlags = 0;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    check_hresult(m_device->CreateTexture2D(&desc, nullptr, m_staging.put()));
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    check_hresult(m_device->CreateTexture2D(&stagingDesc, nullptr, m_staging.put()));
 
     // Fit the entire monitor, preserving aspect ratio; uncovered pixels are black.
     const double scale = std::min(static_cast<double>(m_width) / m_size.Width,
@@ -96,7 +97,7 @@ GraphicsCapture::~GraphicsCapture() {
     try { if (m_pool) m_pool.Close(); } catch (...) {}
 }
 
-bool GraphicsCapture::read(std::vector<BYTE>& pixels) {
+bool GraphicsCapture::update() {
     check_hresult(m_device->GetDeviceRemovedReason());
     MONITORINFO info{};
     info.cbSize = sizeof(info);
@@ -128,6 +129,14 @@ bool GraphicsCapture::read(std::vector<BYTE>& pixels) {
     stream.Enable = TRUE;
     stream.pInputSurface = input.get();
     check_hresult(m_videoContext->VideoProcessorBlt(m_processor.get(), m_outputView.get(), 0, 1, &stream));
+    frame.Close();
+    return true;
+}
+
+bool GraphicsCapture::read(std::vector<BYTE>& pixels) {
+    if (!update()) {
+        return false;
+    }
     m_context->CopyResource(m_staging.get(), m_output.get());
     pixels.resize(static_cast<size_t>(m_width) * m_height * 4);
     D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -138,7 +147,6 @@ bool GraphicsCapture::read(std::vector<BYTE>& pixels) {
             static_cast<size_t>(m_width) * 4);
     }
     m_context->Unmap(m_staging.get(), 0);
-    frame.Close();
     return true;
 }
 } // namespace fastrecord::recording

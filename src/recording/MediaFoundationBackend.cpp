@@ -133,7 +133,8 @@ bool MediaFoundationBackend::start(const RecordingSettings& settings, std::wstri
 
 bool MediaFoundationBackend::pause(std::wstring& error) {
     if (!m_running.load() || m_paused.load()) {
-        error = L"A gravação não está ativa.";
+        std::scoped_lock lock(m_mutex);
+        error = m_workerError.empty() ? L"A gravação não está ativa." : m_workerError;
         return false;
     }
     m_paused = true;
@@ -142,7 +143,8 @@ bool MediaFoundationBackend::pause(std::wstring& error) {
 
 bool MediaFoundationBackend::resume(std::wstring& error) {
     if (!m_running.load() || !m_paused.load()) {
-        error = L"A gravação não está pausada.";
+        std::scoped_lock lock(m_mutex);
+        error = m_workerError.empty() ? L"A gravação não está pausada." : m_workerError;
         return false;
     }
     m_paused = false;
@@ -306,6 +308,7 @@ void MediaFoundationBackend::recordLoop(
     LONGLONG timestamp = 0;
     auto nextFrame = std::chrono::steady_clock::now();
     HRESULT writeResult = S_OK;
+    const wchar_t* writeStage = L"o encoder de vídeo";
 
     while (!m_stopRequested.load()) {
         if (m_paused.load()) {
@@ -315,13 +318,14 @@ void MediaFoundationBackend::recordLoop(
         }
 
         try {
-            capture->read(pixels); // Repeat the last frame when the desktop is static.
+            capture->read(pixels);
         } catch (const winrt::hresult_error& failure) {
             setWorkerError(failure.message().c_str());
             break;
         }
 
         ComPtr<IMFMediaBuffer> buffer;
+        writeStage = L"o buffer de vídeo";
         writeResult = MFCreateMemoryBuffer(frameBytes, &buffer);
         BYTE* destination = nullptr;
         if (SUCCEEDED(writeResult)) {
@@ -338,6 +342,7 @@ void MediaFoundationBackend::recordLoop(
         }
 
         ComPtr<IMFSample> sample;
+        writeStage = L"a amostra de vídeo";
         if (SUCCEEDED(writeResult)) {
             writeResult = MFCreateSample(&sample);
         }
@@ -351,6 +356,7 @@ void MediaFoundationBackend::recordLoop(
             writeResult = sample->SetSampleDuration(frameDuration);
         }
         if (SUCCEEDED(writeResult)) {
+            writeStage = L"o frame no encoder";
             writeResult = writer->WriteSample(streamIndex, sample.Get());
         }
         if (FAILED(writeResult)) {
@@ -369,7 +375,7 @@ void MediaFoundationBackend::recordLoop(
 
     const HRESULT finalizeResult = writer->Finalize();
     if (FAILED(writeResult)) {
-        setWorkerError(hresultMessage(L"A captura foi interrompida", writeResult));
+        setWorkerError(hresultMessage(writeStage, writeResult));
     } else if (FAILED(finalizeResult)) {
         setWorkerError(hresultMessage(L"Não foi possível finalizar o arquivo MP4", finalizeResult));
     }
