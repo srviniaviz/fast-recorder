@@ -73,6 +73,10 @@ Se o monitor for desconectado, sua resolução mudar ou a GPU falhar, o app tent
 - CMake 3.25 ou mais recente;
 - Microsoft Edge WebView2 Runtime.
 
+Os binários do Fast Record usam o runtime C++ estático no Windows. Isso evita
+que uma versão antiga do Visual C++ instalada na máquina interfira na captura;
+o instalador não precisa baixar ou substituir o runtime MSVC.
+
 ### Build básica
 
     cmake -S . -B build -A x64

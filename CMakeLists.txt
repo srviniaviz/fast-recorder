@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.25)
 
 project(FastRecord VERSION 0.1.0 LANGUAGES CXX)
 
+# Ship a self-contained Windows executable. The target machine may have an
+# older MSVC runtime installed; using the static CRT prevents that runtime
+# from changing the behavior of the recorder at run time.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(FASTRECORD_VERSION "${PROJECT_VERSION}" CACHE STRING "Version shown by the app and installer")
 set(FASTRECORD_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${FASTRECORD_GENERATED_DIR}")
