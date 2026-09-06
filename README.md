@@ -178,4 +178,5 @@ em uma máquina com uma GPU AMD compatível.
 
 ## Licença
 
-Ainda não há uma licença definida. Enquanto isso, o código permanece com todos os direitos reservados.
+O Fast Record é distribuído sob a licença [MIT](LICENSE). O texto completo
+está no arquivo `LICENSE` na raiz do repositório.
