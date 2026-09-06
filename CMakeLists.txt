@@ -11,6 +11,7 @@ configure_file(
     @ONLY
 )
 set(FASTRECORD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/fast-record-icon.ico")
+set(FASTRECORD_RESOURCE_HEADER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/resource.h")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/FastRecord.rc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc"
