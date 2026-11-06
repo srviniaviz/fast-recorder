@@ -8,6 +8,8 @@
 #include "recording/NvencProbe.h"
 #include "recording/QsvProbe.h"
 #include "recording/RecorderController.h"
+#include "transcription/TranscriptionModel.h"
+#include "transcription/TranscriptFormat.h"
 #include "ui/AppPage.h"
 
 #include <Windows.h>
@@ -106,6 +108,8 @@ void testSettingsPersistence() {
         L"as configurações ausentes usam captura do monitor em 1080p");
     expect(defaults.framesPerSecond == 30 && defaults.bitrateMbps == 20,
         L"as configurações ausentes usam 30 FPS e 20 Mbps");
+    expect(defaults.transcriptionModel == fastrecord::transcription::Model::Base,
+        L"a qualidade de transcrição padrão é equilibrada");
     expect(defaults.microphoneEnabled && defaults.systemAudioEnabled &&
             !defaults.alwaysOnTop && !defaults.startWithWindows,
         L"as configurações ausentes usam áudio ligado, janela sem pin e sem inicialização automática");
@@ -121,6 +125,7 @@ void testSettingsPersistence() {
     expected.systemAudioEnabled = false;
     expected.alwaysOnTop = true;
     expected.startWithWindows = true;
+    expected.transcriptionModel = fastrecord::transcription::Model::Small;
 
     expect(fastrecord::saveAppSettings(expected, path),
         L"as configurações são gravadas no registro");
@@ -137,6 +142,8 @@ void testSettingsPersistence() {
             loaded.alwaysOnTop == expected.alwaysOnTop &&
             loaded.startWithWindows == expected.startWithWindows,
         L"os toggles sobrevivem ao round-trip");
+    expect(loaded.transcriptionModel == expected.transcriptionModel,
+        L"a qualidade de transcrição sobrevive ao round-trip");
 
     expected.engine = fastrecord::recording::EncoderEngine::Qsv;
     expect(fastrecord::saveAppSettings(expected, path),
@@ -152,6 +159,7 @@ void testSettingsPersistence() {
     invalid.resolution = L"9999x9999";
     invalid.framesPerSecond = 25;
     invalid.bitrateMbps = 100;
+    invalid.transcriptionModel = static_cast<fastrecord::transcription::Model>(99);
     expect(fastrecord::saveAppSettings(invalid, path),
         L"valores fora do domínio ainda podem ser escritos para validação");
     const fastrecord::AppSettings sanitized = fastrecord::loadAppSettings(path);
@@ -162,6 +170,8 @@ void testSettingsPersistence() {
         L"área e resolução inválidas voltam para os padrões");
     expect(sanitized.framesPerSecond == 30 && sanitized.bitrateMbps == 80,
         L"FPS inválido volta ao padrão e bitrate alto é limitado a 80 Mbps");
+    expect(sanitized.transcriptionModel == fastrecord::transcription::Model::Base,
+        L"qualidade de transcrição inválida volta para Base");
 
     invalid.bitrateMbps = 0;
     expect(fastrecord::saveAppSettings(invalid, path),
@@ -740,6 +750,63 @@ void testUiContract() {
         L"a interface não anuncia atalhos de teclado para gravação");
     expect(page.find(L"Gravação rápida") == std::wstring::npos,
         L"a aba de ações rápidas não oferece gravação por atalho");
+    expect(page.find(L"data-tab=\"transcription\"") != std::wstring::npos &&
+            page.find(L"id=\"videoDrop\"") != std::wstring::npos,
+        L"a interface oferece a aba de transcrição com área para soltar vídeos");
+    expect(page.find(L"id=\"transcriptionModelAction\"") != std::wstring::npos &&
+            page.find(L"download-whisper-model") != std::wstring::npos,
+        L"o modelo de transcrição só pode ser baixado por ação explícita");
+    expect(page.find(L"data-value=\"tiny\"") != std::wstring::npos &&
+            page.find(L"data-value=\"base\"") != std::wstring::npos &&
+            page.find(L"data-value=\"small\"") != std::wstring::npos,
+        L"a qualidade da transcrição oferece Tiny, Base e Small");
+    expect(page.find(L"send('transcription-model:'+value)") != std::wstring::npos,
+        L"a escolha de modelo envia o identificador ao app");
+    expect(page.find(L"start-transcription") != std::wstring::npos &&
+            page.find(L"cancel-transcription") != std::wstring::npos,
+        L"a interface permite iniciar e cancelar a transcrição");
+    expect(page.find(L"transcriptionBrowse.disabled=busy") != std::wstring::npos,
+        L"a interface bloqueia a troca de vídeo durante o processamento");
+    expect(page.find(L"save-transcript-srt") != std::wstring::npos &&
+            page.find(L"copy-transcript") != std::wstring::npos,
+        L"a interface oferece copiar o texto e exportar legendas SRT");
+}
+
+void testTranscriptFormatting() {
+    using fastrecord::transcription::Segment;
+    const std::vector<Segment> segments{
+        {1'234, 2'345, L"Olá, mundo!"},
+        {-10, -25, L"Segundo bloco."},
+        {3'000, 4'000, L""},
+    };
+    const std::wstring expectedSrt =
+        L"1\n00:00:01,234 --> 00:00:02,345\nOlá, mundo!\n\n"
+        L"2\n00:00:00,000 --> 00:00:00,000\nSegundo bloco.\n\n";
+    expect(fastrecord::transcription::formatSrt(segments) == expectedSrt,
+        L"a exportação SRT numera os trechos e formata timestamps em milissegundos");
+    expect(fastrecord::transcription::formatPlainText(segments) ==
+            L"Olá, mundo!\nSegundo bloco.",
+        L"o texto copiado omite trechos vazios e preserva a ordem da transcrição");
+    expect(fastrecord::transcription::encodeUtf8(L"ação") == "a\xc3\xa7\xc3\xa3o",
+        L"a exportação converte caracteres acentuados para UTF-8");
+}
+
+void testTranscriptionModels() {
+    using fastrecord::transcription::Model;
+    using fastrecord::transcription::modelFromId;
+    using fastrecord::transcription::modelFromMessage;
+
+    expect(fastrecord::transcription::kModelCatalog.size() == 3,
+        L"o catálogo oferece três níveis de qualidade");
+    expect(modelFromId(L"tiny") == Model::Tiny &&
+            modelFromId(L"base") == Model::Base &&
+            modelFromId(L"small") == Model::Small,
+        L"os identificadores dos modelos são reconhecidos");
+    expect(modelFromMessage(L"transcription-model:small") == Model::Small,
+        L"a mensagem da interface seleciona o modelo indicado");
+    expect(!modelFromMessage(L"transcription-model:unknown").has_value() &&
+            !modelFromMessage(L"other:base").has_value(),
+        L"mensagens de modelo inválidas são recusadas");
 }
 
 } // namespace
@@ -763,6 +830,8 @@ int wmain() {
     testUpdateVersionComparison();
     testUpdateReleaseMetadata();
     testUiContract();
+    testTranscriptFormatting();
+    testTranscriptionModels();
 
     if (SUCCEEDED(comResult)) {
         CoUninitialize();

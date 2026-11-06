@@ -6,9 +6,11 @@
 #include "recording/NvencProbe.h"
 #include "recording/QsvProbe.h"
 #include "recording/RecorderController.h"
+#include "transcription/TranscriptionService.h"
 #include "ui/WebViewHost.h"
 
 #include <Windows.h>
+#include <shellapi.h>
 
 #include <chrono>
 #include <cstdint>
@@ -17,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace fastrecord {
 
@@ -35,6 +38,8 @@ public:
 private:
     static constexpr UINT kShowWindowMessage = WM_APP + 20;
     static constexpr UINT kUpdateTaskFinishedMessage = WM_APP + 21;
+    static constexpr UINT kTranscriptionProgressMessage = WM_APP + 22;
+    static constexpr UINT kTranscriptionTaskFinishedMessage = WM_APP + 23;
     static constexpr int kWindowWidth = 460;
     static constexpr int kWindowHeight = 570;
     static constexpr wchar_t kWindowClassName[] = L"FastRecord.WebView.MainWindow";
@@ -61,6 +66,16 @@ private:
     void beginUpdateCheck();
     void beginUpdateDownload();
     void handleUpdateTaskFinished();
+    void chooseTranscriptionVideo();
+    void handleDroppedFiles(HDROP dropHandle);
+    void selectTranscriptionModel(transcription::Model model);
+    void beginTranscriptionModelDownload();
+    void beginVideoTranscription();
+    void cancelTranscriptionTask();
+    void updateTranscriptionProgress(int percent, const std::wstring& status);
+    void handleTranscriptionTaskFinished();
+    void copyTranscriptToClipboard();
+    void saveTranscriptAsSrt();
     void syncInterface();
     void persistSettings();
 
@@ -80,6 +95,17 @@ private:
     std::uint64_t recordingElapsedSeconds() const;
     std::filesystem::path recordingsDirectory() const;
     void refreshRecordings();
+
+    struct TranscriptionState {
+        transcription::Model model{transcription::Model::Base};
+        bool modelReady{false};
+        bool busy{false};
+        int progress{0};
+        std::wstring status{L"O modelo opcional ainda não foi baixado."};
+        std::filesystem::path videoPath;
+        std::wstring videoName;
+        std::vector<transcription::Segment> segments;
+    };
 
     struct UpdateTaskResult {
         enum class Kind { Check, Download } kind{Kind::Check};
@@ -118,6 +144,9 @@ private:
     std::thread m_updateThread;
     std::mutex m_updateResultMutex;
     std::optional<UpdateTaskResult> m_pendingUpdateResult;
+    TranscriptionState m_transcription;
+    std::mutex m_transcriptionMutex;
+    std::jthread m_transcriptionThread;
 
     platform::TrayIcon m_tray;
     recording::RecorderController m_recorder;

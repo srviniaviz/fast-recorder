@@ -13,12 +13,16 @@
 #include <propsys.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <cwchar>
 #include <cwctype>
 #include <iomanip>
+#include <fstream>
+#include <iterator>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -55,6 +59,17 @@ std::wstring escapeJavaScriptString(const std::wstring& input) {
 
 const wchar_t* jsonBoolean(bool value) {
     return value ? L"true" : L"false";
+}
+
+bool isSupportedVideoPath(const std::filesystem::path& path) {
+    std::wstring extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t character) {
+        return static_cast<wchar_t>(std::towlower(character));
+    });
+    return extension == L".mp4" || extension == L".mov" || extension == L".m4v" ||
+        extension == L".wmv" || extension == L".avi" || extension == L".mkv" ||
+        extension == L".webm" || extension == L".mpg" || extension == L".mpeg" ||
+        extension == L".asf";
 }
 
 } // namespace
@@ -120,6 +135,7 @@ bool AppController::initialize(bool startHidden) {
     m_systemAudioEnabled = savedSettings.systemAudioEnabled;
     m_alwaysOnTop = savedSettings.alwaysOnTop;
     m_startWithWindows = savedSettings.startWithWindows;
+    m_transcription.model = savedSettings.transcriptionModel;
     m_settingsLoaded = true;
 
     if (m_startWithWindows && !platform::isStartWithWindowsEnabled()) {
@@ -145,6 +161,10 @@ bool AppController::initialize(bool startHidden) {
     m_amfProbe = recording::probeAmf();
     m_qsvProbe = recording::probeQsv();
     refreshRecordings();
+    m_transcription.modelReady = transcription::modelAvailable(m_transcription.model);
+    m_transcription.status = m_transcription.modelReady
+        ? L"Modelo Whisper " + std::wstring(transcription::modelPresentation(m_transcription.model).name) + L" pronto."
+        : L"Instale o modelo Whisper escolhido para transcrever.";
 
     if (!createMainWindow() || !createTrayIcon()) {
         shutdown();
@@ -210,6 +230,10 @@ void AppController::shutdown() {
     if (m_updateThread.joinable()) {
         m_updateThread.join();
     }
+    if (m_transcriptionThread.joinable()) {
+        m_transcriptionThread.request_stop();
+        m_transcriptionThread.join();
+    }
 
     if (m_recorder.isRecording()) {
         m_recorder.stop();
@@ -226,6 +250,7 @@ void AppController::shutdown() {
     m_webView.close();
 
     if (m_window != nullptr) {
+        DragAcceptFiles(m_window, FALSE);
         DestroyWindow(m_window);
         m_window = nullptr;
     }
@@ -290,6 +315,7 @@ bool AppController::createMainWindow() {
     if (m_window == nullptr) {
         return false;
     }
+    DragAcceptFiles(m_window, TRUE);
 
     const HRGN roundedRegion = CreateRoundRectRgn(
         0, 0, kWindowWidth + 1, kWindowHeight + 1, 36, 36);
@@ -437,6 +463,24 @@ void AppController::handleWebMessage(const std::wstring& message) {
     if (message == L"ready") {
         m_webViewReady = true;
         syncInterface();
+    } else if (message == L"refresh-transcription") {
+        syncInterface();
+    } else if (message.rfind(transcription::kModelMessagePrefix, 0) == 0) {
+        if (const auto selected = transcription::modelFromMessage(message)) {
+            selectTranscriptionModel(*selected);
+        }
+    } else if (message == L"choose-transcription-video") {
+        chooseTranscriptionVideo();
+    } else if (message == L"download-whisper-model") {
+        beginTranscriptionModelDownload();
+    } else if (message == L"start-transcription") {
+        beginVideoTranscription();
+    } else if (message == L"cancel-transcription") {
+        cancelTranscriptionTask();
+    } else if (message == L"copy-transcript") {
+        copyTranscriptToClipboard();
+    } else if (message == L"save-transcript-srt") {
+        saveTranscriptAsSrt();
     } else if (message == L"check-updates") {
         beginUpdateCheck();
     } else if (message == L"download-update") {
@@ -572,6 +616,451 @@ void AppController::handleWebMessage(const std::wstring& message) {
     }
 }
 
+void AppController::chooseTranscriptionVideo() {
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (m_transcription.busy) {
+            return;
+        }
+    }
+
+    Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+    HRESULT result = CoCreateInstance(
+        CLSID_FileOpenDialog,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (FAILED(result) || !dialog) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"O seletor de arquivos do Windows não pôde ser aberto.";
+        }
+        syncInterface();
+        return;
+    }
+
+    constexpr COMDLG_FILTERSPEC filters[]{
+        {L"Vídeos", L"*.mp4;*.mov;*.m4v;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg;*.asf"},
+        {L"Todos os arquivos", L"*.*"},
+    };
+    dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetDefaultExtension(L"mp4");
+    FILEOPENDIALOGOPTIONS options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    }
+
+    result = dialog->Show(m_window);
+    if (result == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        return;
+    }
+    if (FAILED(result)) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"Não foi possível selecionar o vídeo.";
+        }
+        syncInterface();
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    PWSTR displayName = nullptr;
+    if (FAILED(dialog->GetResult(&item)) || !item ||
+        FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &displayName)) || displayName == nullptr) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"O caminho do vídeo não pôde ser lido.";
+        }
+        syncInterface();
+        return;
+    }
+    const std::filesystem::path path(displayName);
+    CoTaskMemFree(displayName);
+
+    std::error_code pathError;
+    if (!isSupportedVideoPath(path) || !std::filesystem::is_regular_file(path, pathError) || pathError) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"Escolha um arquivo de vídeo compatível.";
+        }
+        syncInterface();
+        return;
+    }
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.videoPath = path;
+        m_transcription.videoName = path.filename().wstring();
+        m_transcription.segments.clear();
+        m_transcription.progress = 0;
+        m_transcription.status = m_transcription.modelReady
+            ? L"Vídeo escolhido. Você já pode iniciar a transcrição."
+            : L"Vídeo escolhido. Baixe o Whisper para habilitar a transcrição.";
+    }
+    syncInterface();
+}
+
+void AppController::handleDroppedFiles(HDROP dropHandle) {
+    if (dropHandle == nullptr) {
+        return;
+    }
+    const UINT count = DragQueryFileW(dropHandle, 0xffffffff, nullptr, 0);
+    if (count != 1) {
+        DragFinish(dropHandle);
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = count == 0
+                ? L"Nenhum arquivo foi recebido."
+                : L"Solte um vídeo por vez para transcrevê-lo.";
+        }
+        syncInterface();
+        return;
+    }
+
+    const UINT characterCount = DragQueryFileW(dropHandle, 0, nullptr, 0);
+    std::wstring droppedPath(static_cast<std::size_t>(characterCount) + 1, L'\0');
+    DragQueryFileW(dropHandle, 0, droppedPath.data(), characterCount + 1);
+    droppedPath.resize(characterCount);
+    DragFinish(dropHandle);
+
+    const std::filesystem::path path(droppedPath);
+    std::error_code pathError;
+    if (!isSupportedVideoPath(path) || !std::filesystem::is_regular_file(path, pathError) || pathError) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"Esse arquivo não parece ser um vídeo compatível.";
+        }
+        syncInterface();
+        return;
+    }
+
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (m_transcription.busy) {
+            return;
+        }
+        m_transcription.videoPath = path;
+        m_transcription.videoName = path.filename().wstring();
+        m_transcription.segments.clear();
+        m_transcription.progress = 0;
+        m_transcription.status = m_transcription.modelReady
+            ? L"Vídeo escolhido. Você já pode iniciar a transcrição."
+            : L"Vídeo escolhido. Baixe o Whisper para habilitar a transcrição.";
+    }
+    syncInterface();
+}
+
+void AppController::selectTranscriptionModel(transcription::Model model) {
+    if (!transcription::isValidModel(model)) {
+        return;
+    }
+
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (m_transcription.busy || m_transcription.model == model) {
+            return;
+        }
+        m_transcription.model = model;
+        m_transcription.modelReady = transcription::modelAvailable(model);
+        const auto& presentation = transcription::modelPresentation(model);
+        m_transcription.status = m_transcription.modelReady
+            ? L"Modelo " + std::wstring(presentation.name) + L" instalado neste PC."
+            : L"Modelo " + std::wstring(presentation.name) + L" selecionado. Baixe-o para transcrever.";
+    }
+    persistSettings();
+    syncInterface();
+}
+
+void AppController::beginTranscriptionModelDownload() {
+    transcription::Model model = transcription::Model::Base;
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (m_transcription.busy || m_transcription.modelReady) {
+            return;
+        }
+        model = m_transcription.model;
+    }
+    if (m_transcriptionThread.joinable()) {
+        m_transcriptionThread.join();
+    }
+
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.busy = true;
+        m_transcription.progress = 0;
+        m_transcription.status = L"Preparando o download do modelo Whisper…";
+    }
+    syncInterface();
+
+    try {
+        m_transcriptionThread = std::jthread([this, model](std::stop_token cancellation) {
+            std::wstring error;
+            const auto progress = [this](int percent, const std::wstring& status) {
+                updateTranscriptionProgress(percent, status);
+            };
+            bool success = false;
+            try {
+                success = transcription::downloadModel(model, cancellation, progress, error);
+            } catch (const std::bad_alloc&) {
+                error = L"Não há memória suficiente para baixar o modelo.";
+            } catch (...) {
+                error = L"Ocorreu um erro inesperado ao baixar o modelo.";
+            }
+            {
+                std::scoped_lock lock(m_transcriptionMutex);
+                m_transcription.modelReady = success || transcription::modelAvailable(model);
+                m_transcription.progress = success ? 100 : m_transcription.progress;
+                if (success) {
+                    m_transcription.status = L"Modelo " +
+                        std::wstring(transcription::modelPresentation(model).name) +
+                        L" pronto. A transcrição fica neste PC.";
+                } else if (cancellation.stop_requested()) {
+                    m_transcription.status = L"Download cancelado.";
+                } else {
+                    m_transcription.status = error.empty()
+                        ? L"O modelo não pôde ser baixado. Tente novamente."
+                        : error;
+                }
+            }
+            PostMessageW(m_window, kTranscriptionTaskFinishedMessage, 0, 0);
+        });
+    } catch (...) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.busy = false;
+            m_transcription.status = L"Não foi possível iniciar o download do modelo.";
+        }
+        syncInterface();
+    }
+}
+
+void AppController::beginVideoTranscription() {
+    std::filesystem::path videoPath;
+    transcription::Model model = transcription::Model::Base;
+    bool canStart = true;
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (m_transcription.busy) {
+            return;
+        }
+        if (!m_transcription.modelReady) {
+            m_transcription.status = L"Baixe o modelo Whisper antes de transcrever.";
+            canStart = false;
+        } else if (m_transcription.videoPath.empty()) {
+            m_transcription.status = L"Escolha ou arraste um vídeo primeiro.";
+            canStart = false;
+        } else {
+            videoPath = m_transcription.videoPath;
+            model = m_transcription.model;
+            m_transcription.busy = true;
+            m_transcription.progress = 0;
+            m_transcription.status = L"Preparando a transcrição…";
+            m_transcription.segments.clear();
+        }
+    }
+    if (!canStart) {
+        syncInterface();
+        return;
+    }
+    if (m_transcriptionThread.joinable()) {
+        m_transcriptionThread.join();
+    }
+    syncInterface();
+
+    try {
+        m_transcriptionThread = std::jthread([this, model, videoPath](std::stop_token cancellation) {
+            std::vector<transcription::Segment> segments;
+            std::wstring error;
+            const auto progress = [this](int percent, const std::wstring& status) {
+                updateTranscriptionProgress(percent, status);
+            };
+            bool success = false;
+            try {
+                success = transcription::transcribeVideo(
+                    model, videoPath, cancellation, progress, segments, error);
+            } catch (const std::bad_alloc&) {
+                error = L"Não há memória suficiente para processar este vídeo.";
+            } catch (...) {
+                error = L"Ocorreu um erro inesperado durante a transcrição.";
+            }
+            {
+                std::scoped_lock lock(m_transcriptionMutex);
+                m_transcription.progress = success ? 100 : m_transcription.progress;
+                if (success) {
+                    m_transcription.segments = std::move(segments);
+                    m_transcription.status = L"Concluída · " +
+                        std::to_wstring(m_transcription.segments.size()) + L" trechos.";
+                } else if (cancellation.stop_requested()) {
+                    m_transcription.status = L"Transcrição cancelada.";
+                } else {
+                    m_transcription.status = error.empty()
+                        ? L"Não foi possível transcrever este vídeo."
+                        : error;
+                }
+            }
+            PostMessageW(m_window, kTranscriptionTaskFinishedMessage, 0, 0);
+        });
+    } catch (...) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.busy = false;
+            m_transcription.status = L"Não foi possível iniciar a transcrição.";
+        }
+        syncInterface();
+    }
+}
+
+void AppController::cancelTranscriptionTask() {
+    if (!m_transcriptionThread.joinable()) {
+        return;
+    }
+    m_transcriptionThread.request_stop();
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.status = L"Cancelando…";
+    }
+    syncInterface();
+}
+
+void AppController::updateTranscriptionProgress(int percent, const std::wstring& status) {
+    bool changed = false;
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        if (!m_transcription.busy) {
+            return;
+        }
+        const int boundedPercent = std::clamp(percent, 0, 100);
+        changed = m_transcription.progress != boundedPercent || m_transcription.status != status;
+        m_transcription.progress = boundedPercent;
+        m_transcription.status = status;
+    }
+    if (changed && m_window != nullptr) {
+        PostMessageW(m_window, kTranscriptionProgressMessage, 0, 0);
+    }
+}
+
+void AppController::handleTranscriptionTaskFinished() {
+    if (m_transcriptionThread.joinable()) {
+        m_transcriptionThread.join();
+    }
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.busy = false;
+    }
+    syncInterface();
+}
+
+void AppController::copyTranscriptToClipboard() {
+    std::wstring text;
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        text = transcription::formatPlainText(m_transcription.segments);
+    }
+    if (text.empty()) {
+        return;
+    }
+    if (!OpenClipboard(m_window)) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"Não foi possível acessar a área de transferência.";
+        }
+        syncInterface();
+        return;
+    }
+    EmptyClipboard();
+    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory == nullptr) {
+        CloseClipboard();
+        return;
+    }
+    void* destination = GlobalLock(memory);
+    if (destination == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return;
+    }
+    std::memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (SetClipboardData(CF_UNICODETEXT, memory) == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return;
+    }
+    CloseClipboard();
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.status = L"Texto copiado para a área de transferência.";
+    }
+    syncInterface();
+}
+
+void AppController::saveTranscriptAsSrt() {
+    std::vector<transcription::Segment> segments;
+    std::wstring suggestedName = L"transcricao.srt";
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        segments = m_transcription.segments;
+        if (!m_transcription.videoPath.empty()) {
+            suggestedName = m_transcription.videoPath.stem().wstring() + L".srt";
+        }
+    }
+    if (segments.empty()) {
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<IFileSaveDialog> dialog;
+    HRESULT result = CoCreateInstance(
+        CLSID_FileSaveDialog,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (FAILED(result) || !dialog) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"O seletor para salvar o arquivo não pôde ser aberto.";
+        }
+        syncInterface();
+        return;
+    }
+    constexpr COMDLG_FILTERSPEC filter{L"Legenda SubRip (*.srt)", L"*.srt"};
+    dialog->SetFileTypes(1, &filter);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetDefaultExtension(L"srt");
+    dialog->SetFileName(suggestedName.c_str());
+    FILEOPENDIALOGOPTIONS options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    }
+    result = dialog->Show(m_window);
+    if (result == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        return;
+    }
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    PWSTR displayName = nullptr;
+    if (FAILED(result) || FAILED(dialog->GetResult(&item)) || !item ||
+        FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &displayName)) || displayName == nullptr) {
+        {
+            std::scoped_lock lock(m_transcriptionMutex);
+            m_transcription.status = L"Não foi possível selecionar onde salvar o SRT.";
+        }
+        syncInterface();
+        return;
+    }
+    const std::filesystem::path destination(displayName);
+    CoTaskMemFree(displayName);
+    const std::string output = transcription::encodeUtf8(transcription::formatSrt(segments));
+    std::ofstream file(destination, std::ios::binary | std::ios::trunc);
+    file.write(output.data(), static_cast<std::streamsize>(output.size()));
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        m_transcription.status = file
+            ? L"Legenda SRT salva."
+            : L"Não foi possível gravar o arquivo SRT.";
+    }
+    syncInterface();
+}
+
 void AppController::beginUpdateCheck() {
     if (m_updateBusy || m_shutdownStarted) {
         return;
@@ -703,6 +1192,36 @@ void AppController::syncInterface() {
         return;
     }
 
+    TranscriptionState transcriptionState;
+    {
+        std::scoped_lock lock(m_transcriptionMutex);
+        transcriptionState = m_transcription;
+    }
+    std::wstring segmentsJson = L"[";
+    for (std::size_t index = 0; index < transcriptionState.segments.size(); ++index) {
+        if (index != 0) {
+            segmentsJson += L",";
+        }
+        const auto& segment = transcriptionState.segments[index];
+        segmentsJson += L"{\"startMs\":" + std::to_wstring(segment.startMilliseconds) +
+            L",\"endMs\":" + std::to_wstring(segment.endMilliseconds) +
+            L",\"text\":\"" + escapeJavaScriptString(segment.text) + L"\"}";
+    }
+    segmentsJson += L"]";
+    const auto& modelInfo = transcription::modelPresentation(transcriptionState.model);
+    const std::wstring transcriptionJson =
+        L"{modelId:\"" + std::wstring(modelInfo.id) + L"\",modelName:\"" +
+        std::wstring(modelInfo.name) + L"\",modelQuality:\"" +
+        std::wstring(modelInfo.quality) + L"\",modelSize:\"" +
+        std::wstring(modelInfo.diskSize) + L"\",modelReady:" +
+        std::wstring(jsonBoolean(transcriptionState.modelReady)) +
+        L",busy:" + jsonBoolean(transcriptionState.busy) +
+        L",progress:" + std::to_wstring(transcriptionState.progress) +
+        L",status:\"" + escapeJavaScriptString(transcriptionState.status) +
+        L"\",videoPath:\"" + escapeJavaScriptString(transcriptionState.videoPath.wstring()) +
+        L"\",videoName:\"" + escapeJavaScriptString(transcriptionState.videoName) +
+        L"\",segments:" + segmentsJson + L"}";
+
     const std::wstring script =
         L"window.fastRecord&&window.fastRecord.setState({"
         L"recording:" + std::wstring(jsonBoolean(m_recorder.isRecording())) +
@@ -724,6 +1243,7 @@ void AppController::syncInterface() {
         L"\",codec:\"" + escapeJavaScriptString(codecValue()) +
         L"\",area:\"" + escapeJavaScriptString(m_area) +
         L"\",recordings:" + m_recordingsJson +
+        L",transcription:" + transcriptionJson +
         L",status:\"" + escapeJavaScriptString(statusText()) +
         L"\",capability:\"" + escapeJavaScriptString(selectedEngineStatus()) +
         L"\"});";
@@ -748,6 +1268,7 @@ void AppController::persistSettings() {
         m_systemAudioEnabled,
         m_alwaysOnTop,
         m_startWithWindows,
+        m_transcription.model,
     };
     saveAppSettings(settings);
 }
@@ -1200,8 +1721,19 @@ LRESULT AppController::handleMessage(
         handleUpdateTaskFinished();
         return 0;
     }
+    if (message == kTranscriptionProgressMessage) {
+        syncInterface();
+        return 0;
+    }
+    if (message == kTranscriptionTaskFinishedMessage) {
+        handleTranscriptionTaskFinished();
+        return 0;
+    }
 
     switch (message) {
+    case WM_DROPFILES:
+        handleDroppedFiles(reinterpret_cast<HDROP>(wParam));
+        return 0;
     case WM_TIMER:
         if (wParam == 1) {
             if (m_recorder.hasFinished()) {

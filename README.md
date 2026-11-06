@@ -33,6 +33,14 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 - detecção em tempo de execução dos drivers NVENC e AMF;
 - instância única: abrir o executável novamente traz o painel existente para frente.
 
+### Transcrição local
+
+A aba **Transcrição** aceita vídeos arrastados para a janela ou escolhidos pelo seletor do Windows. O áudio é extraído pelo Media Foundation e transcrito no próprio computador pelo Whisper, com detecção automática do idioma. Não é necessário instalar FFmpeg. A qualidade pode ser ajustada entre **Tiny** (mais rápido, ~75 MiB), **Base** (equilibrado, ~142 MiB) e **Small** (mais preciso, ~466 MiB). Modelos maiores tendem a reconhecer melhor, mas exigem mais espaço, memória e tempo de processamento.
+
+O modelo escolhido não acompanha o instalador. Ele só é baixado depois que a pessoa escolhe **Baixar** na aba; modelos já instalados ficam em `%LOCALAPPDATA%\Fast Record\Models` e podem ser alternados sem baixar de novo. A escolha é salva entre execuções. O download é validado por tamanho e SHA-256 antes de ser instalado. A transcrição oferece copiar o texto e exportar legendas `.srt` com timestamps.
+
+O Whisper é executado na CPU nesta primeira versão. O vídeo não é enviado a um serviço remoto. A leitura de formatos e codecs depende dos decodificadores disponíveis no Windows; MP4 com H.264/AAC costuma ser a opção mais compatível.
+
 As preferências ficam em **HKEY_CURRENT_USER\Software\Fast Record**. Nenhuma configuração é enviada para fora do computador.
 
 ## Interface
@@ -103,7 +111,8 @@ Depois de configurar e compilar o projeto, rode a suíte determinística com:
 Ela verifica as preferências salvas no Registro, os estados e erros do
 gravador, o contrato da interface, a comparação de versões e os metadados do
 atualizador, as regras do áudio, as sondas de NVENC, AMF e Intel QSV e o
-muxer MP4 (cabeçalho AV1 e marcação de key frames). Os testes `capture-smoke`,
+muxer MP4 (cabeçalho AV1 e marcação de key frames), além da formatação de texto
+e timestamps das legendas SRT. Os testes `capture-smoke`,
 `nvenc-smoke` e `amf-smoke` continuam separados porque precisam de uma sessão
 gráfica, dispositivos de áudio e, no caso do NVENC e do AMF, uma GPU da NVIDIA
 ou da AMD compatível.

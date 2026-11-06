@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(FastRecord VERSION 0.1.0 LANGUAGES CXX)
+project(FastRecord VERSION 0.1.0 LANGUAGES C CXX)
 
 # Ship a self-contained Windows executable. The target machine may have an
 # older MSVC runtime installed; using the static CRT prevents that runtime
@@ -35,6 +35,32 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(webview2)
 
+# The recorder uses Whisper locally for optional video transcription. Only the
+# inference library is built; model weights are downloaded by the user in-app.
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_IS_DEV OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_AVX OFF CACHE BOOL "" FORCE)
+set(GGML_AVX2 OFF CACHE BOOL "" FORCE)
+set(GGML_AVX_VNNI OFF CACHE BOOL "" FORCE)
+set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
+set(GGML_SSE42 OFF CACHE BOOL "" FORCE)
+set(GGML_FMA OFF CACHE BOOL "" FORCE)
+set(GGML_F16C OFF CACHE BOOL "" FORCE)
+set(GGML_BMI2 OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    whisper_cpp
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG d1be6fde11ac6e0407606b4e42fe72d34add8037
+)
+FetchContent_MakeAvailable(whisper_cpp)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -44,6 +70,8 @@ add_executable(fast-record WIN32
     src/app/AppController.cpp
     src/app/AppSettings.cpp
     src/app/UpdateService.cpp
+    src/transcription/TranscriptFormat.cpp
+    src/transcription/TranscriptionService.cpp
     src/platform/CaptureSelector.cpp
     src/platform/TrayIcon.cpp
     src/platform/WindowsStartup.cpp
@@ -64,6 +92,7 @@ add_executable(fast-record WIN32
 target_include_directories(fast-record PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${FASTRECORD_GENERATED_DIR}
+    ${whisper_cpp_SOURCE_DIR}/include
     ${webview2_SOURCE_DIR}/build/native/include
 )
 
@@ -83,6 +112,7 @@ target_link_libraries(fast-record PRIVATE
     ${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib
     advapi32
     bcrypt
+    comctl32
     d3d11
     dxgi
     windowsapp
@@ -98,6 +128,7 @@ target_link_libraries(fast-record PRIVATE
     shlwapi
     user32
     version
+    whisper
     winhttp
     wmcodecdspuuid
 )
@@ -286,6 +317,7 @@ add_executable(fast-record-tests
     tests/FastRecordUnitTests.cpp
     src/app/AppSettings.cpp
     src/app/UpdateService.cpp
+    src/transcription/TranscriptFormat.cpp
     src/platform/TrayIcon.cpp
     src/recording/AmfBackend.cpp
     src/recording/AmfProbe.cpp

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "recording/RecorderController.h"
+#include "transcription/TranscriptionModel.h"
 
 #include <string>
 
@@ -17,6 +18,7 @@ struct AppSettings {
     bool systemAudioEnabled{true};
     bool alwaysOnTop{false};
     bool startWithWindows{false};
+    transcription::Model transcriptionModel{transcription::Model::Base};
 };
 
 // The optional registry path keeps the production key stable while allowing

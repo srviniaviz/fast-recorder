@@ -110,6 +110,8 @@ AppSettings loadAppSettings(const std::wstring& registryPath) {
     settings.systemAudioEnabled = readDword(key, L"SystemAudioEnabled", 1) != 0;
     settings.alwaysOnTop = readDword(key, L"AlwaysOnTop", 0) != 0;
     settings.startWithWindows = readDword(key, L"StartWithWindows", 0) != 0;
+    settings.transcriptionModel = transcription::modelFromPersistedValue(
+        readDword(key, L"TranscriptionModel", static_cast<DWORD>(transcription::Model::Base)));
 
     RegCloseKey(key);
     return settings;
@@ -141,7 +143,13 @@ bool saveAppSettings(const AppSettings& settings, const std::wstring& registryPa
         writeDword(key, L"MicrophoneEnabled", settings.microphoneEnabled ? 1u : 0u) &&
         writeDword(key, L"SystemAudioEnabled", settings.systemAudioEnabled ? 1u : 0u) &&
         writeDword(key, L"AlwaysOnTop", settings.alwaysOnTop ? 1u : 0u) &&
-        writeDword(key, L"StartWithWindows", settings.startWithWindows ? 1u : 0u);
+        writeDword(key, L"StartWithWindows", settings.startWithWindows ? 1u : 0u) &&
+        writeDword(
+            key,
+            L"TranscriptionModel",
+            static_cast<DWORD>(transcription::isValidModel(settings.transcriptionModel)
+                ? settings.transcriptionModel
+                : transcription::Model::Base));
 
     RegCloseKey(key);
     return saved;

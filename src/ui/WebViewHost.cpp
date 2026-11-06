@@ -1,6 +1,8 @@
 #include "ui/WebViewHost.h"
 
 #include <WebView2EnvironmentOptions.h>
+#include <commctrl.h>
+#include <shellapi.h>
 #include <shlobj.h>
 
 #include <filesystem>
@@ -12,6 +14,8 @@ using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 
 namespace {
+
+constexpr UINT_PTR kFileDropSubclassId = 1;
 
 std::wstring webViewDataDirectory() {
     PWSTR localAppData = nullptr;
@@ -31,6 +35,44 @@ std::wstring webViewDataDirectory() {
 }
 
 } // namespace
+
+LRESULT CALLBACK WebViewHost::fileDropProcedure(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR referenceData) {
+    if (message == WM_DROPFILES) {
+        const HWND owner = reinterpret_cast<HWND>(referenceData);
+        if (owner != nullptr && PostMessageW(owner, WM_DROPFILES, wParam, 0)) {
+            return 0;
+        }
+        DragFinish(reinterpret_cast<HDROP>(wParam));
+        return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, &WebViewHost::fileDropProcedure, subclassId);
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+BOOL CALLBACK WebViewHost::configureFileDropWindow(HWND hwnd, LPARAM referenceData) {
+    const HWND owner = reinterpret_cast<HWND>(referenceData);
+    DragAcceptFiles(hwnd, TRUE);
+    SetWindowSubclass(
+        hwnd,
+        &WebViewHost::fileDropProcedure,
+        kFileDropSubclassId,
+        reinterpret_cast<DWORD_PTR>(owner));
+    return TRUE;
+}
+
+BOOL CALLBACK WebViewHost::removeFileDropWindow(HWND hwnd, LPARAM) {
+    DragAcceptFiles(hwnd, FALSE);
+    RemoveWindowSubclass(hwnd, &WebViewHost::fileDropProcedure, kFileDropSubclassId);
+    return TRUE;
+}
 
 WebViewHost::~WebViewHost() {
     close();
@@ -76,6 +118,10 @@ bool WebViewHost::initialize(
                             }
 
                             m_controller = controller;
+                            EnumChildWindows(
+                                m_owner,
+                                &WebViewHost::configureFileDropWindow,
+                                reinterpret_cast<LPARAM>(m_owner));
                             if (FAILED(m_controller->get_CoreWebView2(&m_webView)) || !m_webView) {
                                 if (m_readyCallback) {
                                     m_readyCallback(false);
@@ -144,6 +190,9 @@ void WebViewHost::executeScript(const std::wstring& script) {
 }
 
 void WebViewHost::close() {
+    if (m_owner != nullptr) {
+        EnumChildWindows(m_owner, &WebViewHost::removeFileDropWindow, 0);
+    }
     if (m_webView && m_messageHandlerRegistered) {
         m_webView->remove_WebMessageReceived(m_messageToken);
     }

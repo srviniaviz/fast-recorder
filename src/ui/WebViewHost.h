@@ -30,6 +30,16 @@ public:
     void close();
 
 private:
+    static LRESULT CALLBACK fileDropProcedure(
+        HWND hwnd,
+        UINT message,
+        WPARAM wParam,
+        LPARAM lParam,
+        UINT_PTR subclassId,
+        DWORD_PTR referenceData);
+    static BOOL CALLBACK configureFileDropWindow(HWND hwnd, LPARAM referenceData);
+    static BOOL CALLBACK removeFileDropWindow(HWND hwnd, LPARAM referenceData);
+
     HWND m_owner{nullptr};
     std::wstring m_html;
     MessageCallback m_messageCallback;
