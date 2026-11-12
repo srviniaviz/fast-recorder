@@ -871,6 +871,9 @@ void AppController::beginVideoTranscription() {
         m_transcriptionThread = std::jthread([this, model, videoPath](std::stop_token cancellation) {
             std::vector<transcription::Segment> segments;
             std::wstring error;
+            std::wstring subtitleError;
+            std::filesystem::path subtitlePath;
+            bool subtitleSaved = false;
             const auto progress = [this](int percent, const std::wstring& status) {
                 updateTranscriptionProgress(percent, status);
             };
@@ -883,13 +886,32 @@ void AppController::beginVideoTranscription() {
             } catch (...) {
                 error = L"Ocorreu um erro inesperado durante a transcrição.";
             }
+            if (success && !segments.empty()) {
+                try {
+                    subtitlePath = transcription::srtPathForVideo(videoPath);
+                    subtitleSaved = transcription::saveTranscriptSrt(
+                        subtitlePath, segments, subtitleError);
+                } catch (...) {
+                    subtitleError = L"O arquivo SRT não pôde ser criado ao lado do vídeo.";
+                }
+            }
             {
                 std::scoped_lock lock(m_transcriptionMutex);
                 m_transcription.progress = success ? 100 : m_transcription.progress;
                 if (success) {
                     m_transcription.segments = std::move(segments);
-                    m_transcription.status = L"Concluída · " +
-                        std::to_wstring(m_transcription.segments.size()) + L" trechos.";
+                    if (m_transcription.segments.empty()) {
+                        m_transcription.status = L"Whisper terminou, mas não encontrou fala neste vídeo.";
+                    } else if (subtitleSaved) {
+                        m_transcription.status = L"Concluída · " +
+                            std::to_wstring(m_transcription.segments.size()) +
+                            L" trechos · SRT salvo: " + subtitlePath.filename().wstring();
+                    } else {
+                        m_transcription.status = L"Transcrição concluída, mas o SRT não foi salvo: " +
+                            (subtitleError.empty()
+                                ? L"erro ao gravar ao lado do vídeo."
+                                : subtitleError);
+                    }
                 } else if (cancellation.stop_requested()) {
                     m_transcription.status = L"Transcrição cancelada.";
                 } else {
@@ -1049,14 +1071,13 @@ void AppController::saveTranscriptAsSrt() {
     }
     const std::filesystem::path destination(displayName);
     CoTaskMemFree(displayName);
-    const std::string output = transcription::encodeUtf8(transcription::formatSrt(segments));
-    std::ofstream file(destination, std::ios::binary | std::ios::trunc);
-    file.write(output.data(), static_cast<std::streamsize>(output.size()));
+    std::wstring saveError;
+    const bool saved = transcription::saveTranscriptSrt(destination, segments, saveError);
     {
         std::scoped_lock lock(m_transcriptionMutex);
-        m_transcription.status = file
+        m_transcription.status = saved
             ? L"Legenda SRT salva."
-            : L"Não foi possível gravar o arquivo SRT.";
+            : saveError;
     }
     syncInterface();
 }

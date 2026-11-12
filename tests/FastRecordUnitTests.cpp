@@ -762,6 +762,10 @@ void testUiContract() {
         L"a qualidade da transcrição oferece Tiny, Base e Small");
     expect(page.find(L"send('transcription-model:'+value)") != std::wstring::npos,
         L"a escolha de modelo envia o identificador ao app");
+    expect(page.find(L"positionTranscriptionModelMenu") != std::wstring::npos &&
+            page.find(L"content.style.overflow='visible'") != std::wstring::npos &&
+            page.find(L"root.classList.toggle('dropup',openUp)") != std::wstring::npos,
+        L"o seletor de qualidade muda de lado para permanecer visível na janela");
     expect(page.find(L"start-transcription") != std::wstring::npos &&
             page.find(L"cancel-transcription") != std::wstring::npos,
         L"a interface permite iniciar e cancelar a transcrição");
@@ -789,6 +793,58 @@ void testTranscriptFormatting() {
         L"o texto copiado omite trechos vazios e preserva a ordem da transcrição");
     expect(fastrecord::transcription::encodeUtf8(L"ação") == "a\xc3\xa7\xc3\xa3o",
         L"a exportação converte caracteres acentuados para UTF-8");
+}
+
+void testTranscriptSavesBesideVideo() {
+    using fastrecord::transcription::Segment;
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+        (L"FastRecordTranscript_" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code filesystemError;
+    std::filesystem::remove_all(directory, filesystemError);
+    filesystemError.clear();
+    std::filesystem::create_directories(directory, filesystemError);
+    expect(!filesystemError, L"a pasta temporária para testar SRT é criada");
+    if (filesystemError) {
+        return;
+    }
+
+    const std::filesystem::path videoPath = directory / L"Aula.mp4";
+    const std::filesystem::path subtitlePath =
+        fastrecord::transcription::srtPathForVideo(videoPath);
+    expect(subtitlePath.parent_path() == videoPath.parent_path() &&
+            subtitlePath.filename() == L"Aula.srt",
+        L"o SRT fica ao lado do vídeo e usa o mesmo nome-base");
+
+    {
+        std::ofstream existingSubtitle(subtitlePath, std::ios::binary);
+        existingSubtitle << "legenda existente";
+    }
+    const std::filesystem::path generatedSubtitle =
+        fastrecord::transcription::srtPathForVideo(videoPath);
+    expect(generatedSubtitle.filename() == L"Aula (2).srt",
+        L"a transcrição automática escolhe outro nome sem sobrescrever um SRT existente");
+
+    const std::vector<Segment> segments{{1'250, 2'500, L"Olá, turma."}};
+    std::wstring error;
+    const bool saved = fastrecord::transcription::saveTranscriptSrt(
+        generatedSubtitle, segments, error);
+    expect(saved, L"a transcrição pode ser gravada como arquivo SRT");
+    if (saved) {
+        std::ifstream input(generatedSubtitle, std::ios::binary);
+        const std::string content(
+            (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        expect(content == "1\n00:00:01,250 --> 00:00:02,500\nOl\xc3\xa1, turma.\n\n",
+            L"o arquivo SRT preserva texto UTF-8 e timestamps de início e fim");
+    }
+    {
+        std::ifstream existingSubtitle(subtitlePath, std::ios::binary);
+        const std::string existingContent(
+            (std::istreambuf_iterator<char>(existingSubtitle)), std::istreambuf_iterator<char>());
+        expect(existingContent == "legenda existente",
+            L"a legenda preexistente permanece intacta depois da transcrição");
+    }
+
+    std::filesystem::remove_all(directory, filesystemError);
 }
 
 void testTranscriptionModels() {
@@ -831,6 +887,7 @@ int wmain() {
     testUpdateReleaseMetadata();
     testUiContract();
     testTranscriptFormatting();
+    testTranscriptSavesBesideVideo();
     testTranscriptionModels();
 
     if (SUCCEEDED(comResult)) {

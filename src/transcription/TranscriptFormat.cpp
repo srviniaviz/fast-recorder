@@ -1,6 +1,7 @@
 #include "transcription/TranscriptFormat.h"
 
 #include <algorithm>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
@@ -96,6 +97,60 @@ std::string encodeUtf8(const std::wstring& text) {
         appendCodePoint(output, codePoint);
     }
     return output;
+}
+
+std::filesystem::path srtPathForVideo(const std::filesystem::path& videoPath) {
+    if (videoPath.empty()) {
+        return {};
+    }
+
+    const std::filesystem::path basePath = videoPath.parent_path() /
+        (videoPath.stem().wstring() + L".srt");
+    std::error_code filesystemError;
+    if (!std::filesystem::exists(basePath, filesystemError) && !filesystemError) {
+        return basePath;
+    }
+    if (filesystemError) {
+        return {};
+    }
+
+    const std::wstring stem = videoPath.stem().wstring();
+    for (std::uint32_t suffix = 2; suffix <= 10'000; ++suffix) {
+        const std::filesystem::path candidate = videoPath.parent_path() /
+            (stem + L" (" + std::to_wstring(suffix) + L").srt");
+        filesystemError.clear();
+        if (!std::filesystem::exists(candidate, filesystemError) && !filesystemError) {
+            return candidate;
+        }
+        if (filesystemError) {
+            return {};
+        }
+    }
+    return {};
+}
+
+bool saveTranscriptSrt(
+    const std::filesystem::path& destination,
+    const std::vector<Segment>& segments,
+    std::wstring& error) {
+    if (destination.empty() || segments.empty()) {
+        error = L"Não há transcrição para salvar.";
+        return false;
+    }
+
+    const std::string content = encodeUtf8(formatSrt(segments));
+    std::ofstream file(destination, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        error = L"Não foi possível abrir o arquivo SRT para gravação.";
+        return false;
+    }
+    file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!file) {
+        error = L"Não foi possível concluir a gravação do arquivo SRT.";
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 } // namespace fastrecord::transcription

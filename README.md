@@ -37,7 +37,7 @@ O Fast Record vive na bandeja do sistema e abre um painel compacto quando você 
 
 A aba **Transcrição** aceita vídeos arrastados para a janela ou escolhidos pelo seletor do Windows. O áudio é extraído pelo Media Foundation e transcrito no próprio computador pelo Whisper, com detecção automática do idioma. Não é necessário instalar FFmpeg. A qualidade pode ser ajustada entre **Tiny** (mais rápido, ~75 MiB), **Base** (equilibrado, ~142 MiB) e **Small** (mais preciso, ~466 MiB). Modelos maiores tendem a reconhecer melhor, mas exigem mais espaço, memória e tempo de processamento.
 
-O modelo escolhido não acompanha o instalador. Ele só é baixado depois que a pessoa escolhe **Baixar** na aba; modelos já instalados ficam em `%LOCALAPPDATA%\Fast Record\Models` e podem ser alternados sem baixar de novo. A escolha é salva entre execuções. O download é validado por tamanho e SHA-256 antes de ser instalado. A transcrição oferece copiar o texto e exportar legendas `.srt` com timestamps.
+O modelo escolhido não acompanha o instalador. Ele só é baixado depois que a pessoa escolhe **Baixar** na aba; modelos já instalados ficam em `%LOCALAPPDATA%\Fast Record\Models` e podem ser alternados sem baixar de novo. A escolha é salva entre execuções. O download é validado por tamanho e SHA-256 antes de ser instalado. Ao terminar, o app grava automaticamente um `.srt` com timestamps ao lado do vídeo; também dá para copiar o texto ou exportar outra legenda.
 
 O Whisper é executado na CPU nesta primeira versão. O vídeo não é enviado a um serviço remoto. A leitura de formatos e codecs depende dos decodificadores disponíveis no Windows; MP4 com H.264/AAC costuma ser a opção mais compatível.
 
