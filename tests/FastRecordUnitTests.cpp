@@ -1,6 +1,7 @@
 #include "app/AppSettings.h"
 #include "app/UpdateService.h"
 #include "platform/TrayIcon.h"
+#include "resources/resource.h"
 #include "recording/AmfBackend.h"
 #include "recording/AmfProbe.h"
 #include "recording/AudioCapture.h"
@@ -93,6 +94,118 @@ std::vector<std::uint8_t> iconColorPixels(HICON icon) {
         DeleteObject(iconInfo.hbmMask);
     }
     return pixels;
+}
+
+std::array<int, 2> iconDimensions(HICON icon) {
+    ICONINFO iconInfo{};
+    if (icon == nullptr || !GetIconInfo(icon, &iconInfo)) {
+        return {0, 0};
+    }
+
+    BITMAP bitmap{};
+    const bool readDimensions = iconInfo.hbmColor != nullptr &&
+        GetObjectW(iconInfo.hbmColor, sizeof(bitmap), &bitmap) != 0;
+    if (iconInfo.hbmColor != nullptr) {
+        DeleteObject(iconInfo.hbmColor);
+    }
+    if (iconInfo.hbmMask != nullptr) {
+        DeleteObject(iconInfo.hbmMask);
+    }
+    if (!readDimensions) {
+        return {0, 0};
+    }
+    return {bitmap.bmWidth, std::abs(bitmap.bmHeight)};
+}
+
+std::vector<std::uint8_t> renderIconAtSize(HICON icon, int width, int height) {
+    if (icon == nullptr || width <= 0 || height <= 0) {
+        return {};
+    }
+
+    BITMAPINFO description{};
+    description.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    description.bmiHeader.biWidth = width;
+    description.bmiHeader.biHeight = -height;
+    description.bmiHeader.biPlanes = 1;
+    description.bmiHeader.biBitCount = 32;
+    description.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = GetDC(nullptr);
+    if (screen == nullptr) {
+        return {};
+    }
+    void* pixelData = nullptr;
+    HBITMAP canvas = CreateDIBSection(
+        screen,
+        &description,
+        DIB_RGB_COLORS,
+        &pixelData,
+        nullptr,
+        0);
+    HDC canvasDc = canvas != nullptr ? CreateCompatibleDC(screen) : nullptr;
+    std::vector<std::uint8_t> pixels;
+    if (canvas != nullptr && canvasDc != nullptr && pixelData != nullptr) {
+        std::memset(pixelData, 0, static_cast<std::size_t>(width) * height * 4);
+        const HGDIOBJ previousBitmap = SelectObject(canvasDc, canvas);
+        const bool rendered = DrawIconEx(
+            canvasDc,
+            0,
+            0,
+            icon,
+            width,
+            height,
+            0,
+            nullptr,
+            DI_NORMAL) != FALSE;
+        if (rendered) {
+            GdiFlush();
+            const auto* firstPixel = static_cast<const std::uint8_t*>(pixelData);
+            pixels.assign(firstPixel, firstPixel + static_cast<std::size_t>(width) * height * 4);
+        }
+        if (previousBitmap != nullptr && previousBitmap != HGDI_ERROR) {
+            SelectObject(canvasDc, previousBitmap);
+        }
+    }
+
+    if (canvasDc != nullptr) {
+        DeleteDC(canvasDc);
+    }
+    if (canvas != nullptr) {
+        DeleteObject(canvas);
+    }
+    ReleaseDC(nullptr, screen);
+    return pixels;
+}
+
+std::size_t countDifferentPixels(
+    const std::vector<std::uint8_t>& left,
+    const std::vector<std::uint8_t>& right) {
+    if (left.size() != right.size() || left.size() % 4 != 0) {
+        return 0;
+    }
+
+    std::size_t differentPixels = 0;
+    for (std::size_t offset = 0; offset < left.size(); offset += 4) {
+        if (std::memcmp(left.data() + offset, right.data() + offset, 4) != 0) {
+            ++differentPixels;
+        }
+    }
+    return differentPixels;
+}
+
+std::size_t countVisiblePixels(const std::vector<std::uint8_t>& pixels) {
+    if (pixels.size() % 4 != 0) {
+        return 0;
+    }
+
+    std::size_t visiblePixels = 0;
+    for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
+        if (pixels[offset] != 0 || pixels[offset + 1] != 0 ||
+            pixels[offset + 2] != 0 || pixels[offset + 3] != 0) {
+            ++visiblePixels;
+        }
+    }
+    return visiblePixels;
 }
 
 void testSettingsPersistence() {
@@ -482,17 +595,55 @@ void testCapabilityProbes() {
 }
 
 void testTrayPulseFrames() {
-    const HICON baseIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    const HICON compactPulse = fastrecord::platform::TrayIcon::createPulseFrame(baseIcon, false);
-    const HICON expandedPulse = fastrecord::platform::TrayIcon::createPulseFrame(baseIcon, true);
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    const HICON trayIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_FAST_RECORD));
+    const HICON fullSizeIcon = static_cast<HICON>(LoadImageW(
+        instance,
+        MAKEINTRESOURCEW(IDI_FAST_RECORD),
+        IMAGE_ICON,
+        256,
+        256,
+        LR_DEFAULTCOLOR));
+    expect(trayIcon != nullptr && fullSizeIcon != nullptr,
+        L"o ícone real do app é carregado nos tamanhos de bandeja e de recurso");
+    if (trayIcon == nullptr || fullSizeIcon == nullptr) {
+        if (trayIcon != nullptr) {
+            DestroyIcon(trayIcon);
+        }
+        if (fullSizeIcon != nullptr) {
+            DestroyIcon(fullSizeIcon);
+        }
+        return;
+    }
+
+    const auto sourceDimensions = iconDimensions(fullSizeIcon);
+    expect(sourceDimensions == std::array<int, 2>{256, 256},
+        L"o teste usa a dimensão 256x256 do recurso de ícone do app");
+
+    const HICON compactPulse = fastrecord::platform::TrayIcon::createPulseFrame(trayIcon, false);
+    const HICON expandedPulse = fastrecord::platform::TrayIcon::createPulseFrame(trayIcon, true);
     expect(compactPulse != nullptr && expandedPulse != nullptr,
-        L"os dois quadros pulsantes do ícone da bandeja são criados");
+        L"os dois quadros pulsantes são criados a partir do ícone carregado na bandeja");
 
     if (compactPulse != nullptr && expandedPulse != nullptr) {
+        const auto compactDimensions = iconDimensions(compactPulse);
+        const auto expandedDimensions = iconDimensions(expandedPulse);
+        expect(compactDimensions == std::array<int, 2>{32, 32} &&
+                expandedDimensions == std::array<int, 2>{32, 32},
+            L"os quadros animados são rasterizados no tamanho adequado à bandeja");
+
         const auto compactPixels = iconColorPixels(compactPulse);
         const auto expandedPixels = iconColorPixels(expandedPulse);
         expect(!compactPixels.empty() && !expandedPixels.empty() && compactPixels != expandedPixels,
             L"os quadros do ícone têm aparência diferente para produzir a pulsação");
+
+        const auto compactTrayPixels = renderIconAtSize(compactPulse, 16, 16);
+        const auto expandedTrayPixels = renderIconAtSize(expandedPulse, 16, 16);
+        expect(countVisiblePixels(compactTrayPixels) >= 20 &&
+                countVisiblePixels(expandedTrayPixels) >= 20,
+            L"os dois frames mantêm o logo visível no tamanho da bandeja");
+        expect(countDifferentPixels(compactTrayPixels, expandedTrayPixels) >= 12,
+            L"a pulsação continua visível quando o Explorer reduz o ícone para 16x16");
     }
     if (compactPulse != nullptr) {
         DestroyIcon(compactPulse);
@@ -500,6 +651,15 @@ void testTrayPulseFrames() {
     if (expandedPulse != nullptr) {
         DestroyIcon(expandedPulse);
     }
+
+    const HICON fullSizePulse = fastrecord::platform::TrayIcon::createPulseFrame(fullSizeIcon, true);
+    expect(fullSizePulse != nullptr,
+        L"o frame pulsante também aceita o recurso original de 256x256");
+    if (fullSizePulse != nullptr) {
+        DestroyIcon(fullSizePulse);
+    }
+    DestroyIcon(fullSizeIcon);
+    DestroyIcon(trayIcon);
 }
 
 void testAmfBackendFailurePath() {

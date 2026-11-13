@@ -315,6 +315,7 @@ enable_testing()
 
 add_executable(fast-record-tests
     tests/FastRecordUnitTests.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/FastRecord.rc
     src/app/AppSettings.cpp
     src/app/UpdateService.cpp
     src/transcription/TranscriptFormat.cpp
