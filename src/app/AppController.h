@@ -12,7 +12,9 @@
 #include <Windows.h>
 #include <shellapi.h>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -40,6 +42,8 @@ private:
     static constexpr UINT kUpdateTaskFinishedMessage = WM_APP + 21;
     static constexpr UINT kTranscriptionProgressMessage = WM_APP + 22;
     static constexpr UINT kTranscriptionTaskFinishedMessage = WM_APP + 23;
+    static constexpr UINT kRecordingPulseTimerId = 2;
+    static constexpr std::size_t kRecordingPulseFrameCount = 8;
     static constexpr int kWindowWidth = 460;
     static constexpr int kWindowHeight = 570;
     static constexpr wchar_t kWindowClassName[] = L"FastRecord.WebView.MainWindow";
@@ -117,8 +121,8 @@ private:
     HINSTANCE m_instance{nullptr};
     HWND m_window{nullptr};
     HICON m_icon{nullptr};
-    HICON m_recordingPulseIcons[2]{nullptr, nullptr};
-    bool m_recordingPulsePhase{false};
+    std::array<HICON, kRecordingPulseFrameCount> m_recordingPulseIcons{};
+    std::size_t m_recordingPulseFrame{0};
     HANDLE m_singleInstanceMutex{nullptr};
     bool m_comInitialized{false};
     bool m_shutdownStarted{false};

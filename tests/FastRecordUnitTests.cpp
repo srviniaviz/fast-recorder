@@ -48,54 +48,6 @@ void removeTestRegistryKey(const std::wstring& path) {
     RegDeleteTreeW(HKEY_CURRENT_USER, path.c_str());
 }
 
-std::vector<std::uint8_t> iconColorPixels(HICON icon) {
-    ICONINFO iconInfo{};
-    if (icon == nullptr || !GetIconInfo(icon, &iconInfo)) {
-        return {};
-    }
-
-    std::vector<std::uint8_t> pixels;
-    BITMAP bitmap{};
-    if (iconInfo.hbmColor != nullptr &&
-        GetObjectW(iconInfo.hbmColor, sizeof(bitmap), &bitmap) != 0) {
-        const int width = bitmap.bmWidth;
-        const int height = std::abs(bitmap.bmHeight);
-        if (width > 0 && height > 0) {
-            BITMAPINFO description{};
-            description.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            description.bmiHeader.biWidth = width;
-            description.bmiHeader.biHeight = -height;
-            description.bmiHeader.biPlanes = 1;
-            description.bmiHeader.biBitCount = 32;
-            description.bmiHeader.biCompression = BI_RGB;
-            pixels.resize(static_cast<std::size_t>(width) * height * 4);
-
-            HDC screen = GetDC(nullptr);
-            if (screen == nullptr || GetDIBits(
-                    screen,
-                    iconInfo.hbmColor,
-                    0,
-                    static_cast<UINT>(height),
-                    pixels.data(),
-                    &description,
-                    DIB_RGB_COLORS) != height) {
-                pixels.clear();
-            }
-            if (screen != nullptr) {
-                ReleaseDC(nullptr, screen);
-            }
-        }
-    }
-
-    if (iconInfo.hbmColor != nullptr) {
-        DeleteObject(iconInfo.hbmColor);
-    }
-    if (iconInfo.hbmMask != nullptr) {
-        DeleteObject(iconInfo.hbmMask);
-    }
-    return pixels;
-}
-
 std::array<int, 2> iconDimensions(HICON icon) {
     ICONINFO iconInfo{};
     if (icon == nullptr || !GetIconInfo(icon, &iconInfo)) {
@@ -206,6 +158,27 @@ std::size_t countVisiblePixels(const std::vector<std::uint8_t>& pixels) {
         }
     }
     return visiblePixels;
+}
+
+bool leftHalfMatches(
+    const std::vector<std::uint8_t>& left,
+    const std::vector<std::uint8_t>& right,
+    int width,
+    int height) {
+    if (width <= 0 || height <= 0 || left.size() != right.size() ||
+        left.size() != static_cast<std::size_t>(width) * height * 4) {
+        return false;
+    }
+
+    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4;
+    const std::size_t halfRowBytes = static_cast<std::size_t>(width / 2) * 4;
+    for (int row = 0; row < height; ++row) {
+        const std::size_t offset = static_cast<std::size_t>(row) * rowBytes;
+        if (std::memcmp(left.data() + offset, right.data() + offset, halfRowBytes) != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void testSettingsPersistence() {
@@ -620,39 +593,44 @@ void testTrayPulseFrames() {
     expect(sourceDimensions == std::array<int, 2>{256, 256},
         L"o teste usa a dimensão 256x256 do recurso de ícone do app");
 
-    const HICON compactPulse = fastrecord::platform::TrayIcon::createPulseFrame(trayIcon, false);
-    const HICON expandedPulse = fastrecord::platform::TrayIcon::createPulseFrame(trayIcon, true);
-    expect(compactPulse != nullptr && expandedPulse != nullptr,
-        L"os dois quadros pulsantes são criados a partir do ícone carregado na bandeja");
-
-    if (compactPulse != nullptr && expandedPulse != nullptr) {
-        const auto compactDimensions = iconDimensions(compactPulse);
-        const auto expandedDimensions = iconDimensions(expandedPulse);
-        expect(compactDimensions == std::array<int, 2>{32, 32} &&
-                expandedDimensions == std::array<int, 2>{32, 32},
-            L"os quadros animados são rasterizados no tamanho adequado à bandeja");
-
-        const auto compactPixels = iconColorPixels(compactPulse);
-        const auto expandedPixels = iconColorPixels(expandedPulse);
-        expect(!compactPixels.empty() && !expandedPixels.empty() && compactPixels != expandedPixels,
-            L"os quadros do ícone têm aparência diferente para produzir a pulsação");
-
-        const auto compactTrayPixels = renderIconAtSize(compactPulse, 16, 16);
-        const auto expandedTrayPixels = renderIconAtSize(expandedPulse, 16, 16);
-        expect(countVisiblePixels(compactTrayPixels) >= 20 &&
-                countVisiblePixels(expandedTrayPixels) >= 20,
-            L"os dois frames mantêm o logo visível no tamanho da bandeja");
-        expect(countDifferentPixels(compactTrayPixels, expandedTrayPixels) >= 12,
-            L"a pulsação continua visível quando o Explorer reduz o ícone para 16x16");
+    constexpr std::array<float, 8> pulseIntensities{
+        0.08F, 0.20F, 0.42F, 0.72F, 0.94F, 0.86F, 0.60F, 0.30F,
+    };
+    std::array<HICON, pulseIntensities.size()> pulseFrames{};
+    std::array<std::vector<std::uint8_t>, pulseIntensities.size()> trayFrames{};
+    bool allFramesCreated = true;
+    for (std::size_t frame = 0; frame < pulseIntensities.size(); ++frame) {
+        pulseFrames[frame] = fastrecord::platform::TrayIcon::createPulseFrame(
+            trayIcon,
+            pulseIntensities[frame]);
+        allFramesCreated = allFramesCreated && pulseFrames[frame] != nullptr;
+        if (pulseFrames[frame] != nullptr) {
+            expect(iconDimensions(pulseFrames[frame]) == std::array<int, 2>{32, 32},
+                L"todos os frames mantêm a dimensão constante do ícone");
+            trayFrames[frame] = renderIconAtSize(pulseFrames[frame], 16, 16);
+            expect(countVisiblePixels(trayFrames[frame]) >= 20,
+                L"cada frame mantém o logo visível no tamanho da bandeja");
+        }
     }
-    if (compactPulse != nullptr) {
-        DestroyIcon(compactPulse);
+    expect(allFramesCreated,
+        L"os oito frames suaves são criados a partir do ícone carregado na bandeja");
+    if (allFramesCreated) {
+        expect(countDifferentPixels(trayFrames[0], trayFrames[4]) >= 4,
+            L"o brilho do indicador varia de forma visível em 16x16");
+        expect(leftHalfMatches(trayFrames[0], trayFrames[4], 16, 16),
+            L"a animação altera o indicador sem redimensionar o logo");
+        for (std::size_t frame = 1; frame < trayFrames.size(); ++frame) {
+            expect(countDifferentPixels(trayFrames[frame - 1], trayFrames[frame]) > 0,
+                L"cada passo da pulsação tem uma transição visual própria");
+        }
     }
-    if (expandedPulse != nullptr) {
-        DestroyIcon(expandedPulse);
+    for (HICON pulseFrame : pulseFrames) {
+        if (pulseFrame != nullptr) {
+            DestroyIcon(pulseFrame);
+        }
     }
 
-    const HICON fullSizePulse = fastrecord::platform::TrayIcon::createPulseFrame(fullSizeIcon, true);
+    const HICON fullSizePulse = fastrecord::platform::TrayIcon::createPulseFrame(fullSizeIcon, 1.0F);
     expect(fullSizePulse != nullptr,
         L"o frame pulsante também aceita o recurso original de 256x256");
     if (fullSizePulse != nullptr) {

@@ -1,5 +1,7 @@
 #include "platform/TrayIcon.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
@@ -26,13 +28,96 @@ struct IconBitmapGuard {
     }
 };
 
+void blendPixel(
+    std::uint8_t* destination,
+    std::uint8_t blue,
+    std::uint8_t green,
+    std::uint8_t red,
+    std::uint8_t alpha) {
+    if (alpha == 0) {
+        return;
+    }
+
+    const std::uint32_t destinationAlpha = destination[3];
+    const std::uint32_t inverseAlpha = 255u - alpha;
+    const std::uint32_t outputAlpha = alpha +
+        (destinationAlpha * inverseAlpha + 127u) / 255u;
+    const auto compositeChannel = [=](std::uint8_t source, std::uint8_t current) {
+        const std::uint32_t sourcePremultiplied =
+            static_cast<std::uint32_t>(source) * alpha;
+        const std::uint32_t destinationPremultiplied =
+            (static_cast<std::uint32_t>(current) * destinationAlpha * inverseAlpha + 127u) / 255u;
+        return static_cast<std::uint8_t>(
+            (sourcePremultiplied + destinationPremultiplied + outputAlpha / 2u) / outputAlpha);
+    };
+
+    destination[0] = compositeChannel(blue, destination[0]);
+    destination[1] = compositeChannel(green, destination[1]);
+    destination[2] = compositeChannel(red, destination[2]);
+    destination[3] = static_cast<std::uint8_t>(outputAlpha);
+}
+
+void paintDisc(
+    std::uint8_t* pixels,
+    int width,
+    int height,
+    float centerX,
+    float centerY,
+    float radius,
+    std::uint8_t blue,
+    std::uint8_t green,
+    std::uint8_t red,
+    std::uint8_t opacity) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float dx = static_cast<float>(x) - centerX;
+            const float dy = static_cast<float>(y) - centerY;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float coverage = std::clamp(radius + 0.5F - distance, 0.0F, 1.0F);
+            const auto alpha = static_cast<std::uint8_t>(opacity * coverage);
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) * width + x) * 4;
+            blendPixel(pixels + offset, blue, green, red, alpha);
+        }
+    }
+}
+
+void paintRing(
+    std::uint8_t* pixels,
+    int width,
+    int height,
+    float centerX,
+    float centerY,
+    float radius,
+    float thickness,
+    std::uint8_t blue,
+    std::uint8_t green,
+    std::uint8_t red,
+    std::uint8_t opacity) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float dx = static_cast<float>(x) - centerX;
+            const float dy = static_cast<float>(y) - centerY;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float coverage = std::clamp(
+                thickness + 0.5F - std::abs(distance - radius),
+                0.0F,
+                1.0F);
+            const auto alpha = static_cast<std::uint8_t>(opacity * coverage);
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) * width + x) * 4;
+            blendPixel(pixels + offset, blue, green, red, alpha);
+        }
+    }
+}
+
 } // namespace
 
 TrayIcon::~TrayIcon() {
     destroy();
 }
 
-HICON TrayIcon::createPulseFrame(HICON baseIcon, bool expanded) {
+HICON TrayIcon::createPulseFrame(HICON baseIcon, float intensity) {
     if (baseIcon == nullptr) {
         return nullptr;
     }
@@ -57,10 +142,10 @@ HICON TrayIcon::createPulseFrame(HICON baseIcon, bool expanded) {
         return nullptr;
     }
 
-    // Keep the shell icon tray-sized, but scale the logo inside its canvas to
-    // make the pulse visible after Windows reduces it to the notification area.
+    // Keep the logo fixed; only the recording indicator's glow changes per frame.
     constexpr int width = 32;
     constexpr int height = 32;
+    intensity = std::clamp(intensity, 0.0F, 1.0F);
 
     BITMAPINFO colorDescription{};
     colorDescription.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -99,18 +184,8 @@ HICON TrayIcon::createPulseFrame(HICON baseIcon, bool expanded) {
     }
     const HGDIOBJ previousBitmap = SelectObject(memoryDc, colorBitmap);
     const bool bitmapSelected = previousBitmap != nullptr && previousBitmap != HGDI_ERROR;
-    const int iconSize = expanded ? width : 24;
-    const int iconOffset = (width - iconSize) / 2;
     const bool iconDrawn = bitmapSelected && DrawIconEx(
-            memoryDc,
-            iconOffset,
-            iconOffset,
-            baseIcon,
-            iconSize,
-            iconSize,
-            0,
-            nullptr,
-            DI_NORMAL) != FALSE;
+            memoryDc, 0, 0, baseIcon, width, height, 0, nullptr, DI_NORMAL) != FALSE;
     if (previousBitmap != nullptr && previousBitmap != HGDI_ERROR) {
         SelectObject(memoryDc, previousBitmap);
     }
@@ -122,6 +197,27 @@ HICON TrayIcon::createPulseFrame(HICON baseIcon, bool expanded) {
     }
 
     auto* pixels = static_cast<std::uint8_t*>(colorPixels);
+    constexpr float indicatorX = 24.0F;
+    constexpr float indicatorY = 7.0F;
+    const auto glowOpacity = static_cast<std::uint8_t>(190.0F * intensity);
+    paintRing(
+        pixels,
+        width,
+        height,
+        indicatorX,
+        indicatorY,
+        4.1F,
+        1.25F,
+        62,
+        54,
+        255,
+        glowOpacity);
+    paintDisc(pixels, width, height, indicatorX, indicatorY, 3.35F, 18, 19, 25, 255);
+    paintDisc(pixels, width, height, indicatorX, indicatorY, 2.75F, 240, 241, 246, 255);
+    const auto coreBlue = static_cast<std::uint8_t>(48.0F + 28.0F * intensity);
+    const auto coreGreen = static_cast<std::uint8_t>(38.0F + 30.0F * intensity);
+    paintDisc(pixels, width, height, indicatorX, indicatorY, 2.1F, coreBlue, coreGreen, 255, 255);
+
     struct MonochromeBitmapInfo {
         BITMAPINFOHEADER header;
         RGBQUAD colors[2];

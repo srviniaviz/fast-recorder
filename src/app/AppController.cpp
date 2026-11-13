@@ -17,6 +17,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cwchar>
 #include <cwctype>
 #include <iomanip>
@@ -201,6 +202,7 @@ bool AppController::initialize(bool startHidden) {
         showMainWindow();
     }
     SetTimer(m_window, 1, 250, nullptr);
+    SetTimer(m_window, kRecordingPulseTimerId, 125, nullptr);
     beginUpdateCheck();
     return true;
 }
@@ -272,9 +274,17 @@ bool AppController::createMainWindow() {
     if (m_icon == nullptr) {
         return false;
     }
-    m_recordingPulseIcons[0] = platform::TrayIcon::createPulseFrame(m_icon, false);
-    m_recordingPulseIcons[1] = platform::TrayIcon::createPulseFrame(m_icon, true);
-    if (m_recordingPulseIcons[0] == nullptr || m_recordingPulseIcons[1] == nullptr) {
+    constexpr std::array<float, kRecordingPulseFrameCount> pulseIntensities{
+        0.08F, 0.20F, 0.42F, 0.72F, 0.94F, 0.86F, 0.60F, 0.30F,
+    };
+    for (std::size_t frame = 0; frame < pulseIntensities.size(); ++frame) {
+        m_recordingPulseIcons[frame] = platform::TrayIcon::createPulseFrame(
+            m_icon,
+            pulseIntensities[frame]);
+    }
+    if (std::any_of(m_recordingPulseIcons.begin(), m_recordingPulseIcons.end(), [](HICON icon) {
+            return icon == nullptr;
+        })) {
         for (HICON& pulseIcon : m_recordingPulseIcons) {
             if (pulseIcon != nullptr) {
                 DestroyIcon(pulseIcon);
@@ -1346,7 +1356,7 @@ void AppController::startRecording() {
         m_recordingElapsed = std::chrono::milliseconds{0};
         m_recordingResumedAt = std::chrono::steady_clock::now();
         m_recordingClockRunning = true;
-        m_recordingPulsePhase = false;
+        m_recordingPulseFrame = 0;
     }
     if (result.success) {
         if (m_microphoneEnabled && m_systemAudioEnabled) {
@@ -1369,7 +1379,7 @@ void AppController::togglePause() {
     const auto result = m_recorder.isPaused() ? m_recorder.resume() : m_recorder.pause();
     m_status = result.message;
     if (result.success) {
-        m_recordingPulsePhase = false;
+        m_recordingPulseFrame = 0;
         if (m_recorder.isPaused()) {
             m_recordingElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - m_recordingResumedAt);
@@ -1391,7 +1401,7 @@ void AppController::stopRecording() {
             std::chrono::steady_clock::now() - m_recordingResumedAt);
     }
     m_recordingClockRunning = false;
-    m_recordingPulsePhase = false;
+    m_recordingPulseFrame = 0;
     const auto result = m_recorder.stop();
     const auto output = m_recorder.outputPath();
     m_status = result.success && !output.empty()
@@ -1424,10 +1434,9 @@ void AppController::updateTrayTooltip() {
 }
 
 void AppController::updateTrayIcon() {
-    if (m_recorder.isRecording() &&
-        m_recordingPulseIcons[0] != nullptr &&
-        m_recordingPulseIcons[1] != nullptr) {
-        m_tray.setIcon(m_recordingPulseIcons[m_recordingPulsePhase ? 1 : 0]);
+    if (m_recorder.isRecording() && !m_recorder.isPaused() &&
+        m_recordingPulseIcons[0] != nullptr) {
+        m_tray.setIcon(m_recordingPulseIcons[m_recordingPulseFrame]);
     } else {
         m_tray.setIcon(m_icon);
     }
@@ -1760,8 +1769,13 @@ LRESULT AppController::handleMessage(
             if (m_recorder.hasFinished()) {
                 stopRecording();
             } else if (m_recorder.isRecording()) {
-                m_recordingPulsePhase = !m_recordingPulsePhase;
                 syncInterface();
+            }
+        } else if (wParam == kRecordingPulseTimerId) {
+            if (m_recorder.isRecording() && !m_recorder.isPaused()) {
+                m_recordingPulseFrame =
+                    (m_recordingPulseFrame + 1) % m_recordingPulseIcons.size();
+                updateTrayIcon();
             }
         }
         return 0;
