@@ -720,7 +720,8 @@ void NvencBackend::recordLoop(
         };
 
         timestamp += frameDuration;
-        auto nextFrame = std::chrono::steady_clock::now();
+        const auto framePeriod = std::chrono::nanoseconds(frameDuration * 100);
+        auto nextFrame = std::chrono::steady_clock::now() + framePeriod;
         while (!m_stopRequested.load()) {
             if (m_paused.load()) {
                 if (!processAudio(false)) break;
@@ -731,10 +732,17 @@ void NvencBackend::recordLoop(
 
             if (!processAudio(true)) break;
 
-            if (!capture->update()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                continue;
+            const auto now = std::chrono::steady_clock::now();
+            if (nextFrame > now) {
+                std::this_thread::sleep_until(nextFrame);
+            } else if (now - nextFrame > std::chrono::milliseconds(250)) {
+                nextFrame = now;
             }
+
+            // Windows only delivers capture frames when the desktop changes.
+            // Keep encoding the last texture on the frame clock so static
+            // content advances at the same rate as the audio timeline.
+            capture->update();
 
             std::vector<std::uint8_t> packet;
             if (!encoder.encode(capture->texture(), timestamp, packet, loopError)) {
@@ -745,13 +753,7 @@ void NvencBackend::recordLoop(
             }
 
             timestamp += frameDuration;
-            nextFrame += std::chrono::nanoseconds(frameDuration * 100);
-            const auto now = std::chrono::steady_clock::now();
-            if (nextFrame > now) {
-                std::this_thread::sleep_until(nextFrame);
-            } else if (now - nextFrame > std::chrono::milliseconds(250)) {
-                nextFrame = now;
-            }
+            nextFrame += framePeriod;
         }
 
         if (loopError.empty() && !processAudio(true)) {
