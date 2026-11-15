@@ -33,6 +33,12 @@ public:
     ID3D11Texture2D* texture() const noexcept { return m_output.get(); }
 
 private:
+    // Points the video processor at m_size: the whole source (or the region),
+    // letterboxed into the fixed output size.
+    void configureStream();
+    void startSession();
+    void switchToWindow(HWND window);
+
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem m_item{nullptr};
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool m_pool{nullptr};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession m_session{nullptr};
@@ -50,6 +56,11 @@ private:
     UINT m_width{}, m_height{};
     HMONITOR m_monitor{};
     bool m_monitorSource{true};
+    bool m_windowSource{false};
+    bool m_captureCursor{true};
+    bool m_hasRegion{false};
+    RECT m_region{};
+    std::shared_ptr<CaptureRetarget> m_retarget;
 };
 
 } // namespace fastrecord::recording

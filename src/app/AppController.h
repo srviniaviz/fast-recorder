@@ -1,5 +1,6 @@
 #pragma once
 
+#include "platform/CaptureSelector.h"
 #include "platform/TrayIcon.h"
 #include "app/UpdateService.h"
 #include "recording/AmfProbe.h"
@@ -17,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -83,7 +85,12 @@ private:
     void syncInterface();
     void persistSettings();
 
-    void startRecording();
+    // With the "window" area and no window given, opens the in-app window picker instead.
+    void startRecording(HWND selectedWindow = nullptr);
+    // switching: offer the windows to move an in-progress window recording to.
+    void showWindowPicker(bool switching);
+    void recordPickedWindow(const std::wstring& value);
+    std::wstring recordingTargetJson();
     void togglePause();
     void stopRecording();
     void toggleRecording();
@@ -123,6 +130,13 @@ private:
     HICON m_icon{nullptr};
     std::array<HICON, kRecordingPulseFrameCount> m_recordingPulseIcons{};
     std::size_t m_recordingPulseFrame{0};
+    HICON m_pausedIcon{nullptr};
+    // Windows offered by the last picker; a pick must be one of these.
+    std::vector<platform::CaptureWindowInfo> m_pickerWindows;
+    bool m_pickerSwitching{false};
+    // Window being recorded (window area only) and the channel to move the capture.
+    std::optional<platform::CaptureWindowInfo> m_recordingTarget;
+    std::shared_ptr<recording::CaptureRetarget> m_captureRetarget;
     HANDLE m_singleInstanceMutex{nullptr};
     bool m_comInitialized{false};
     bool m_shutdownStarted{false};

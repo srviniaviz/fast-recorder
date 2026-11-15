@@ -18,7 +18,12 @@ public:
     TrayIcon& operator=(const TrayIcon&) = delete;
     ~TrayIcon();
 
-    static HICON createPulseFrame(HICON baseIcon, float intensity);
+    // Size of a notification-area icon for the current system DPI.
+    static int traySize();
+    // Recording state: light ring around a red dot whose size and glow follow intensity.
+    static HICON createRecordingFrame(int size, float intensity);
+    // Paused state: grey ring with pause bars.
+    static HICON createPausedIcon(int size);
 
     bool create(HWND owner, HICON icon, const std::wstring& tooltip, Callback callback);
     void destroy();

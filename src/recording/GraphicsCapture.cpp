@@ -29,6 +29,11 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings, CaptureOutpu
         : MonitorFromPoint(POINT{}, MONITOR_DEFAULTTOPRIMARY);
     m_monitor = monitor;
     m_monitorSource = settings.target.kind != CaptureTargetKind::SelectedWindow;
+    m_windowSource = !m_monitorSource;
+    m_captureCursor = settings.captureCursor;
+    if (m_windowSource) {
+        m_retarget = settings.retarget;
+    }
     if (settings.target.kind == CaptureTargetKind::SelectedWindow) {
         if (settings.target.window == nullptr || !IsWindow(settings.target.window) ||
             !IsWindowVisible(settings.target.window)) {
@@ -95,44 +100,53 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings, CaptureOutpu
         m_videoContext->VideoProcessorSetOutputColorSpace(m_processor.get(), &output);
     }
 
-    // Fit the entire monitor, preserving aspect ratio; uncovered pixels are black.
-    const double scale = std::min(static_cast<double>(m_width) / m_size.Width,
-        static_cast<double>(m_height) / m_size.Height);
-    const LONG fitWidth = static_cast<LONG>(m_size.Width * scale);
-    const LONG fitHeight = static_cast<LONG>(m_size.Height * scale);
-    const LONG left = (static_cast<LONG>(m_width) - fitWidth) / 2;
-    const LONG top = (static_cast<LONG>(m_height) - fitHeight) / 2;
-    RECT source{0, 0, m_size.Width, m_size.Height};
     if (settings.target.kind == CaptureTargetKind::SelectedRegion) {
         MONITORINFO monitorInfo{};
         monitorInfo.cbSize = sizeof(monitorInfo);
         if (!GetMonitorInfoW(m_monitor, &monitorInfo)) {
             throw hresult_error(E_INVALIDARG, L"Não foi possível identificar o monitor da região.");
         }
-        source.left = std::max<LONG>(0, settings.captureRegion.left - monitorInfo.rcMonitor.left);
-        source.top = std::max<LONG>(0, settings.captureRegion.top - monitorInfo.rcMonitor.top);
-        source.right = std::min<LONG>(m_size.Width, settings.captureRegion.right - monitorInfo.rcMonitor.left);
-        source.bottom = std::min<LONG>(m_size.Height, settings.captureRegion.bottom - monitorInfo.rcMonitor.top);
-        if (source.right - source.left < 2 || source.bottom - source.top < 2) {
+        m_region.left = std::max<LONG>(0, settings.captureRegion.left - monitorInfo.rcMonitor.left);
+        m_region.top = std::max<LONG>(0, settings.captureRegion.top - monitorInfo.rcMonitor.top);
+        m_region.right = std::min<LONG>(m_size.Width, settings.captureRegion.right - monitorInfo.rcMonitor.left);
+        m_region.bottom = std::min<LONG>(m_size.Height, settings.captureRegion.bottom - monitorInfo.rcMonitor.top);
+        if (m_region.right - m_region.left < 2 || m_region.bottom - m_region.top < 2) {
             throw hresult_error(E_INVALIDARG, L"A região selecionada é pequena demais.");
         }
+        m_hasRegion = true;
     }
-    const RECT destination{left, top, left + fitWidth, top + fitHeight};
     const RECT target{0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height)};
     D3D11_VIDEO_COLOR black{};
     black.RGBA.A = 1.f;
     m_videoContext->VideoProcessorSetOutputBackgroundColor(m_processor.get(), FALSE, &black);
     m_videoContext->VideoProcessorSetOutputTargetRect(m_processor.get(), TRUE, &target);
-    m_videoContext->VideoProcessorSetStreamSourceRect(m_processor.get(), 0, TRUE, &source);
-    m_videoContext->VideoProcessorSetStreamDestRect(m_processor.get(), 0, TRUE, &destination);
     m_videoContext->VideoProcessorSetStreamFrameFormat(m_processor.get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
     m_videoContext->VideoProcessorSetStreamAutoProcessingMode(m_processor.get(), 0, FALSE);
+    configureStream();
 
     m_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+    startSession();
+}
+
+void GraphicsCapture::configureStream() {
+    const RECT source = m_hasRegion ? m_region : RECT{0, 0, m_size.Width, m_size.Height};
+    // Fit the entire capture item, preserving aspect ratio; uncovered pixels are black.
+    const double scale = std::min(static_cast<double>(m_width) / m_size.Width,
+        static_cast<double>(m_height) / m_size.Height);
+    const LONG fitWidth = std::max<LONG>(1, static_cast<LONG>(m_size.Width * scale));
+    const LONG fitHeight = std::max<LONG>(1, static_cast<LONG>(m_size.Height * scale));
+    const LONG left = (static_cast<LONG>(m_width) - fitWidth) / 2;
+    const LONG top = (static_cast<LONG>(m_height) - fitHeight) / 2;
+    const RECT destination{left, top, left + fitWidth, top + fitHeight};
+    m_videoContext->VideoProcessorSetStreamSourceRect(m_processor.get(), 0, TRUE, &source);
+    m_videoContext->VideoProcessorSetStreamDestRect(m_processor.get(), 0, TRUE, &destination);
+}
+
+void GraphicsCapture::startSession() {
     m_session = m_pool.CreateCaptureSession(m_item);
     if (const auto options = m_session.try_as<IGraphicsCaptureSession2>()) {
-        options.IsCursorCaptureEnabled(settings.captureCursor);
+        options.IsCursorCaptureEnabled(m_captureCursor);
     }
     // Windows Graphics Capture adds a colored border to the captured display
     // by default. It is useful for interactive capture tools, but it becomes
@@ -141,6 +155,30 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings, CaptureOutpu
         options.IsBorderRequired(false);
     }
     m_session.StartCapture();
+}
+
+void GraphicsCapture::switchToWindow(HWND window) {
+    if (window == nullptr || !IsWindow(window) || !IsWindowVisible(window)) {
+        return;
+    }
+    // Build the new item first so a failure keeps the current window recording.
+    GraphicsCaptureItem item{nullptr};
+    const auto factory = get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+    if (FAILED(factory->CreateForWindow(window, guid_of<GraphicsCaptureItem>(), put_abi(item))) ||
+        !item) {
+        return;
+    }
+    const auto size = item.Size();
+    if (size.Width <= 0 || size.Height <= 0) {
+        return;
+    }
+
+    m_session.Close();
+    m_item = item;
+    m_size = size;
+    m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+    configureStream();
+    startSession();
 }
 
 GraphicsCapture::~GraphicsCapture() {
@@ -157,6 +195,11 @@ bool GraphicsCapture::update() {
         info.rcMonitor.bottom - info.rcMonitor.top != m_size.Height)) {
         throw hresult_error(E_ABORT, L"O monitor foi desconectado ou teve sua resolução alterada.");
     }
+    if (m_retarget) {
+        if (const HWND next = m_retarget->take()) {
+            switchToWindow(next);
+        }
+    }
     // Drain only the bounded pool. A static desktop can legitimately produce no frames.
     auto frame = m_pool.TryGetNextFrame();
     if (!frame) return false;
@@ -166,7 +209,19 @@ bool GraphicsCapture::update() {
     }
     const auto size = frame.ContentSize();
     if (size.Width != m_size.Width || size.Height != m_size.Height) {
-        throw hresult_error(E_ABORT, L"A resolução do monitor mudou. Inicie uma nova gravação.");
+        if (!m_windowSource) {
+            throw hresult_error(E_ABORT, L"A resolução do monitor mudou. Inicie uma nova gravação.");
+        }
+        // A recorded window was resized: follow it. The video keeps its size and
+        // the window is refitted inside it; the next frame arrives at the new size.
+        frame.Close();
+        if (size.Width <= 0 || size.Height <= 0) {
+            return false;
+        }
+        m_size = size;
+        m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+        configureStream();
+        return false;
     }
     const auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     com_ptr<ID3D11Texture2D> texture;

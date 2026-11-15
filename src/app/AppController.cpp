@@ -249,6 +249,9 @@ void AppController::shutdown() {
             DestroyIcon(pulseIcon);
         }
     }
+    if (m_pausedIcon != nullptr) {
+        DestroyIcon(m_pausedIcon);
+    }
     m_webView.close();
 
     if (m_window != nullptr) {
@@ -277,11 +280,13 @@ bool AppController::createMainWindow() {
     constexpr std::array<float, kRecordingPulseFrameCount> pulseIntensities{
         0.08F, 0.20F, 0.42F, 0.72F, 0.94F, 0.86F, 0.60F, 0.30F,
     };
+    const int traySize = platform::TrayIcon::traySize();
     for (std::size_t frame = 0; frame < pulseIntensities.size(); ++frame) {
-        m_recordingPulseIcons[frame] = platform::TrayIcon::createPulseFrame(
-            m_icon,
+        m_recordingPulseIcons[frame] = platform::TrayIcon::createRecordingFrame(
+            traySize,
             pulseIntensities[frame]);
     }
+    m_pausedIcon = platform::TrayIcon::createPausedIcon(traySize);
     if (std::any_of(m_recordingPulseIcons.begin(), m_recordingPulseIcons.end(), [](HICON icon) {
             return icon == nullptr;
         })) {
@@ -497,6 +502,19 @@ void AppController::handleWebMessage(const std::wstring& message) {
         beginUpdateDownload();
     } else if (message == L"record") {
         startRecording();
+    } else if (message.starts_with(L"record-window:")) {
+        recordPickedWindow(message.substr(14));
+    } else if (message == L"switch-window") {
+        if (m_recorder.isRecording() && m_recordingTarget && m_captureRetarget) {
+            showWindowPicker(true);
+        }
+    } else if (message == L"window-picker-cancel") {
+        m_pickerWindows.clear();
+        if (!m_pickerSwitching) {
+            m_status = L"Seleção de janela cancelada.";
+        }
+        m_pickerSwitching = false;
+        syncInterface();
     } else if (message == L"pause") {
         togglePause();
     } else if (message == L"stop") {
@@ -1273,7 +1291,8 @@ void AppController::syncInterface() {
         L"\",engine:\"" + escapeJavaScriptString(engineValue()) +
         L"\",codec:\"" + escapeJavaScriptString(codecValue()) +
         L"\",area:\"" + escapeJavaScriptString(m_area) +
-        L"\",recordings:" + m_recordingsJson +
+        L"\",target:" + recordingTargetJson() +
+        L",recordings:" + m_recordingsJson +
         L",transcription:" + transcriptionJson +
         L",status:\"" + escapeJavaScriptString(statusText()) +
         L"\",capability:\"" + escapeJavaScriptString(selectedEngineStatus()) +
@@ -1304,7 +1323,99 @@ void AppController::persistSettings() {
     saveAppSettings(settings);
 }
 
-void AppController::startRecording() {
+std::wstring AppController::recordingTargetJson() {
+    if (!m_recorder.isRecording() || !m_recordingTarget) {
+        return L"null";
+    }
+    // Follow title changes (browser tabs, documents) while recording.
+    const HWND window = m_recordingTarget->handle;
+    if (IsWindow(window)) {
+        const int length = GetWindowTextLengthW(window);
+        if (length > 0) {
+            std::wstring title(static_cast<std::size_t>(length) + 1, L'\0');
+            title.resize(static_cast<std::size_t>(
+                GetWindowTextW(window, title.data(), length + 1)));
+            if (!title.empty()) {
+                m_recordingTarget->title = std::move(title);
+            }
+        }
+    }
+    return L"{title:\"" + escapeJavaScriptString(m_recordingTarget->title) +
+        L"\",app:\"" + escapeJavaScriptString(m_recordingTarget->appName) +
+        L"\",icon:\"" + escapeJavaScriptString(m_recordingTarget->iconDataUrl) +
+        L"\",closed:" + jsonBoolean(!IsWindow(window)) + L"}";
+}
+
+void AppController::showWindowPicker(bool switching) {
+    showMainWindow();
+    m_pickerSwitching = switching;
+    m_pickerWindows = platform::listCaptureWindows(m_window);
+    const HWND current = switching && m_recordingTarget ? m_recordingTarget->handle : nullptr;
+    std::wstring json = L"[";
+    for (const auto& window : m_pickerWindows) {
+        if (json.size() > 1) {
+            json += L",";
+        }
+        json += L"{id:\"" +
+            std::to_wstring(reinterpret_cast<std::uintptr_t>(window.handle)) +
+            L"\",title:\"" + escapeJavaScriptString(window.title) +
+            L"\",app:\"" + escapeJavaScriptString(window.appName) +
+            L"\",icon:\"" + escapeJavaScriptString(window.iconDataUrl) +
+            L"\",minimized:" + jsonBoolean(window.minimized) +
+            L",current:" + jsonBoolean(window.handle == current) + L"}";
+    }
+    json += L"]";
+    m_webView.executeScript(
+        L"window.fastRecord&&window.fastRecord.showWindowPicker(" + json +
+        L",{switching:" + jsonBoolean(switching) + L"});");
+}
+
+void AppController::recordPickedWindow(const std::wstring& value) {
+    wchar_t* end = nullptr;
+    const auto parsed = std::wcstoull(value.c_str(), &end, 10);
+    const HWND window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parsed));
+    const auto offered = end != value.c_str() && *end == L'\0'
+        ? std::find_if(m_pickerWindows.begin(), m_pickerWindows.end(),
+              [window](const auto& entry) { return entry.handle == window; })
+        : m_pickerWindows.end();
+    std::optional<platform::CaptureWindowInfo> picked;
+    if (offered != m_pickerWindows.end()) {
+        picked = *offered;
+    }
+    const bool switching = std::exchange(m_pickerSwitching, false);
+    m_pickerWindows.clear();
+    if (!picked || !platform::isCaptureWindowCandidate(window, m_window)) {
+        m_status = L"A janela escolhida não está mais disponível.";
+        syncInterface();
+        return;
+    }
+
+    if (switching) {
+        if (!m_recorder.isRecording() || !m_captureRetarget) {
+            syncInterface();
+            return;
+        }
+        if (IsIconic(window)) {
+            ShowWindow(window, SW_RESTORE);
+        }
+        m_captureRetarget->request(window);
+        m_recordingTarget = std::move(picked);
+        m_status = L"Gravando agora: " + m_recordingTarget->title;
+        syncInterface();
+        return;
+    }
+
+    startRecording(window);
+    if (m_recorder.isRecording()) {
+        m_recordingTarget = std::move(picked);
+        syncInterface();
+    }
+}
+
+void AppController::startRecording(HWND selectedWindow) {
+    if (m_recorder.isRecording()) {
+        return;
+    }
     unsigned int width = 1920;
     unsigned int height = 1080;
     if (swscanf_s(m_resolution.c_str(), L"%ux%u", &width, &height) != 2) {
@@ -1318,11 +1429,14 @@ void AppController::startRecording() {
     settings.target.monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
 
     if (m_area == L"window") {
-        const HWND selectedWindow = platform::chooseCaptureWindow(m_window, m_window);
         if (selectedWindow == nullptr) {
-            m_status = L"Seleção de janela cancelada.";
-            syncInterface();
+            showWindowPicker(false);
             return;
+        }
+        m_captureRetarget = std::make_shared<recording::CaptureRetarget>();
+        settings.retarget = m_captureRetarget;
+        if (IsIconic(selectedWindow)) {
+            ShowWindow(selectedWindow, SW_RESTORE);
         }
         settings.target.kind = recording::CaptureTargetKind::SelectedWindow;
         settings.target.window = selectedWindow;
@@ -1402,6 +1516,8 @@ void AppController::stopRecording() {
     }
     m_recordingClockRunning = false;
     m_recordingPulseFrame = 0;
+    m_recordingTarget.reset();
+    m_captureRetarget.reset();
     const auto result = m_recorder.stop();
     const auto output = m_recorder.outputPath();
     m_status = result.success && !output.empty()
@@ -1426,6 +1542,10 @@ void AppController::toggleRecording() {
 void AppController::updateTrayTooltip() {
     if (m_recorder.isPaused()) {
         m_tray.setTooltip(L"Fast Record - pausado");
+    } else if (m_recorder.isRecording() && m_recordingTarget) {
+        const auto& name = m_recordingTarget->appName.empty()
+            ? m_recordingTarget->title : m_recordingTarget->appName;
+        m_tray.setTooltip(L"Fast Record - gravando: " + name);
     } else if (m_recorder.isRecording()) {
         m_tray.setTooltip(L"Fast Record - gravando");
     } else {
@@ -1434,7 +1554,9 @@ void AppController::updateTrayTooltip() {
 }
 
 void AppController::updateTrayIcon() {
-    if (m_recorder.isRecording() && !m_recorder.isPaused() &&
+    if (m_recorder.isPaused() && m_pausedIcon != nullptr) {
+        m_tray.setIcon(m_pausedIcon);
+    } else if (m_recorder.isRecording() && !m_recorder.isPaused() &&
         m_recordingPulseIcons[0] != nullptr) {
         m_tray.setIcon(m_recordingPulseIcons[m_recordingPulseFrame]);
     } else {

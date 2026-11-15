@@ -160,27 +160,6 @@ std::size_t countVisiblePixels(const std::vector<std::uint8_t>& pixels) {
     return visiblePixels;
 }
 
-bool leftHalfMatches(
-    const std::vector<std::uint8_t>& left,
-    const std::vector<std::uint8_t>& right,
-    int width,
-    int height) {
-    if (width <= 0 || height <= 0 || left.size() != right.size() ||
-        left.size() != static_cast<std::size_t>(width) * height * 4) {
-        return false;
-    }
-
-    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4;
-    const std::size_t halfRowBytes = static_cast<std::size_t>(width / 2) * 4;
-    for (int row = 0; row < height; ++row) {
-        const std::size_t offset = static_cast<std::size_t>(row) * rowBytes;
-        if (std::memcmp(left.data() + offset, right.data() + offset, halfRowBytes) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void testSettingsPersistence() {
     const std::wstring path = testRegistryPath();
     removeTestRegistryKey(path);
@@ -568,76 +547,71 @@ void testCapabilityProbes() {
 }
 
 void testTrayPulseFrames() {
-    const HINSTANCE instance = GetModuleHandleW(nullptr);
-    const HICON trayIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_FAST_RECORD));
-    const HICON fullSizeIcon = static_cast<HICON>(LoadImageW(
-        instance,
-        MAKEINTRESOURCEW(IDI_FAST_RECORD),
-        IMAGE_ICON,
-        256,
-        256,
-        LR_DEFAULTCOLOR));
-    expect(trayIcon != nullptr && fullSizeIcon != nullptr,
-        L"o ícone real do app é carregado nos tamanhos de bandeja e de recurso");
-    if (trayIcon == nullptr || fullSizeIcon == nullptr) {
-        if (trayIcon != nullptr) {
-            DestroyIcon(trayIcon);
-        }
-        if (fullSizeIcon != nullptr) {
-            DestroyIcon(fullSizeIcon);
-        }
-        return;
-    }
+    expect(fastrecord::platform::TrayIcon::createRecordingFrame(4, 1.0F) == nullptr,
+        L"o quadro de gravação recusa tamanhos pequenos demais");
 
-    const auto sourceDimensions = iconDimensions(fullSizeIcon);
-    expect(sourceDimensions == std::array<int, 2>{256, 256},
-        L"o teste usa a dimensão 256x256 do recurso de ícone do app");
+    const auto centerPixel = [](const std::vector<std::uint8_t>& pixels, int size) {
+        const std::size_t offset =
+            (static_cast<std::size_t>(size / 2) * size + size / 2) * 4;
+        return std::array<int, 3>{pixels[offset + 2], pixels[offset + 1], pixels[offset]};
+    };
 
     constexpr std::array<float, 8> pulseIntensities{
         0.08F, 0.20F, 0.42F, 0.72F, 0.94F, 0.86F, 0.60F, 0.30F,
     };
-    std::array<HICON, pulseIntensities.size()> pulseFrames{};
-    std::array<std::vector<std::uint8_t>, pulseIntensities.size()> trayFrames{};
-    bool allFramesCreated = true;
-    for (std::size_t frame = 0; frame < pulseIntensities.size(); ++frame) {
-        pulseFrames[frame] = fastrecord::platform::TrayIcon::createPulseFrame(
-            trayIcon,
-            pulseIntensities[frame]);
-        allFramesCreated = allFramesCreated && pulseFrames[frame] != nullptr;
-        if (pulseFrames[frame] != nullptr) {
-            expect(iconDimensions(pulseFrames[frame]) == std::array<int, 2>{32, 32},
-                L"todos os frames mantêm a dimensão constante do ícone");
-            trayFrames[frame] = renderIconAtSize(pulseFrames[frame], 16, 16);
-            expect(countVisiblePixels(trayFrames[frame]) >= 20,
-                L"cada frame mantém o logo visível no tamanho da bandeja");
+    for (const int size : {16, 20, 24, 32}) {
+        std::array<HICON, pulseIntensities.size()> pulseFrames{};
+        std::array<std::vector<std::uint8_t>, pulseIntensities.size()> trayFrames{};
+        bool allFramesCreated = true;
+        for (std::size_t frame = 0; frame < pulseIntensities.size(); ++frame) {
+            pulseFrames[frame] = fastrecord::platform::TrayIcon::createRecordingFrame(
+                size,
+                pulseIntensities[frame]);
+            allFramesCreated = allFramesCreated && pulseFrames[frame] != nullptr;
+            if (pulseFrames[frame] != nullptr) {
+                expect(iconDimensions(pulseFrames[frame]) == std::array<int, 2>{size, size},
+                    L"o quadro de gravação é desenhado no tamanho exato da bandeja");
+                trayFrames[frame] = renderIconAtSize(pulseFrames[frame], size, size);
+                expect(countVisiblePixels(trayFrames[frame]) >= static_cast<std::size_t>(size * size / 2),
+                    L"o indicador de gravação ocupa o ícone inteiro, não só um canto");
+            }
         }
-    }
-    expect(allFramesCreated,
-        L"os oito frames suaves são criados a partir do ícone carregado na bandeja");
-    if (allFramesCreated) {
-        expect(countDifferentPixels(trayFrames[0], trayFrames[4]) >= 4,
-            L"o brilho do indicador varia de forma visível em 16x16");
-        expect(leftHalfMatches(trayFrames[0], trayFrames[4], 16, 16),
-            L"a animação altera o indicador sem redimensionar o logo");
-        for (std::size_t frame = 1; frame < trayFrames.size(); ++frame) {
-            expect(countDifferentPixels(trayFrames[frame - 1], trayFrames[frame]) > 0,
-                L"cada passo da pulsação tem uma transição visual própria");
-        }
-    }
-    for (HICON pulseFrame : pulseFrames) {
-        if (pulseFrame != nullptr) {
-            DestroyIcon(pulseFrame);
-        }
-    }
+        expect(allFramesCreated, L"os oito quadros de gravação são criados");
 
-    const HICON fullSizePulse = fastrecord::platform::TrayIcon::createPulseFrame(fullSizeIcon, 1.0F);
-    expect(fullSizePulse != nullptr,
-        L"o frame pulsante também aceita o recurso original de 256x256");
-    if (fullSizePulse != nullptr) {
-        DestroyIcon(fullSizePulse);
+        const HICON paused = fastrecord::platform::TrayIcon::createPausedIcon(size);
+        expect(paused != nullptr, L"o ícone de pausa é criado");
+
+        if (allFramesCreated) {
+            const auto core = centerPixel(trayFrames[4], size);
+            expect(core[0] > 200 && core[1] < 100 && core[2] < 100,
+                L"o centro do ícone de gravação é vermelho forte");
+            expect(countDifferentPixels(trayFrames[0], trayFrames[4]) >=
+                    static_cast<std::size_t>(size),
+                L"a pulsação muda de forma visível no tamanho da bandeja");
+            for (std::size_t frame = 1; frame < trayFrames.size(); ++frame) {
+                expect(countDifferentPixels(trayFrames[frame - 1], trayFrames[frame]) > 0,
+                    L"cada passo da pulsação tem uma transição visual própria");
+            }
+            if (paused != nullptr) {
+                const auto pausedPixels = renderIconAtSize(paused, size, size);
+                const auto pausedCore = centerPixel(pausedPixels, size);
+                expect(pausedCore[0] < 120,
+                    L"o ícone de pausa não usa o vermelho da gravação no centro");
+                expect(countDifferentPixels(pausedPixels, trayFrames[4]) >=
+                        static_cast<std::size_t>(size * size / 4),
+                    L"pausa e gravação são visualmente distintas");
+            }
+        }
+
+        for (HICON pulseFrame : pulseFrames) {
+            if (pulseFrame != nullptr) {
+                DestroyIcon(pulseFrame);
+            }
+        }
+        if (paused != nullptr) {
+            DestroyIcon(paused);
+        }
     }
-    DestroyIcon(fullSizeIcon);
-    DestroyIcon(trayIcon);
 }
 
 void testAmfBackendFailurePath() {
