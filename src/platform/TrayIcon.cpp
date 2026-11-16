@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cwchar>
 #include <utility>
+#include <vector>
 
 namespace fastrecord::platform {
 
@@ -16,99 +17,131 @@ void copyText(wchar_t (&destination)[Size], const std::wstring& source) {
     wcsncpy_s(destination, Size, source.c_str(), _TRUNCATE);
 }
 
-struct IconBitmapGuard {
-    ICONINFO& info;
-    ~IconBitmapGuard() {
-        if (info.hbmColor != nullptr) {
-            DeleteObject(info.hbmColor);
-        }
-        if (info.hbmMask != nullptr) {
-            DeleteObject(info.hbmMask);
-        }
-    }
+struct Color {
+    std::uint8_t red;
+    std::uint8_t green;
+    std::uint8_t blue;
 };
 
-void blendPixel(
-    std::uint8_t* destination,
-    std::uint8_t blue,
-    std::uint8_t green,
-    std::uint8_t red,
-    std::uint8_t alpha) {
-    if (alpha == 0) {
-        return;
+// Straight-alpha BGRA canvas drawn directly at the tray size, so the shell
+// never has to downscale (and blur) the recording indicator.
+class Canvas {
+public:
+    explicit Canvas(int size)
+        : m_size(size), m_pixels(static_cast<std::size_t>(size) * size * 4, 0) {}
+
+    int size() const noexcept { return m_size; }
+    const std::vector<std::uint8_t>& pixels() const noexcept { return m_pixels; }
+
+    void disc(float radius, Color color, float opacity = 1.0F) {
+        const float center = m_size / 2.0F;
+        fill(color, opacity, [=](float x, float y) {
+            const float distance = std::hypot(x - center, y - center);
+            return std::clamp(radius + 0.5F - distance, 0.0F, 1.0F);
+        });
     }
 
-    const std::uint32_t destinationAlpha = destination[3];
-    const std::uint32_t inverseAlpha = 255u - alpha;
-    const std::uint32_t outputAlpha = alpha +
-        (destinationAlpha * inverseAlpha + 127u) / 255u;
-    const auto compositeChannel = [=](std::uint8_t source, std::uint8_t current) {
-        const std::uint32_t sourcePremultiplied =
-            static_cast<std::uint32_t>(source) * alpha;
-        const std::uint32_t destinationPremultiplied =
-            (static_cast<std::uint32_t>(current) * destinationAlpha * inverseAlpha + 127u) / 255u;
-        return static_cast<std::uint8_t>(
-            (sourcePremultiplied + destinationPremultiplied + outputAlpha / 2u) / outputAlpha);
-    };
+    void rect(float left, float top, float right, float bottom, Color color) {
+        fill(color, 1.0F, [=](float x, float y) {
+            const float horizontal =
+                std::clamp(std::min(x - left, right - x) + 0.5F, 0.0F, 1.0F);
+            const float vertical =
+                std::clamp(std::min(y - top, bottom - y) + 0.5F, 0.0F, 1.0F);
+            return horizontal * vertical;
+        });
+    }
 
-    destination[0] = compositeChannel(blue, destination[0]);
-    destination[1] = compositeChannel(green, destination[1]);
-    destination[2] = compositeChannel(red, destination[2]);
-    destination[3] = static_cast<std::uint8_t>(outputAlpha);
-}
-
-void paintDisc(
-    std::uint8_t* pixels,
-    int width,
-    int height,
-    float centerX,
-    float centerY,
-    float radius,
-    std::uint8_t blue,
-    std::uint8_t green,
-    std::uint8_t red,
-    std::uint8_t opacity) {
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const float dx = static_cast<float>(x) - centerX;
-            const float dy = static_cast<float>(y) - centerY;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            const float coverage = std::clamp(radius + 0.5F - distance, 0.0F, 1.0F);
-            const auto alpha = static_cast<std::uint8_t>(opacity * coverage);
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width + x) * 4;
-            blendPixel(pixels + offset, blue, green, red, alpha);
+private:
+    template <typename Coverage>
+    void fill(Color color, float opacity, Coverage coverage) {
+        for (int y = 0; y < m_size; ++y) {
+            for (int x = 0; x < m_size; ++x) {
+                const float alpha =
+                    opacity * coverage(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
+                if (alpha > 0.0F) {
+                    blend(x, y, color, alpha);
+                }
+            }
         }
     }
-}
 
-void paintRing(
-    std::uint8_t* pixels,
-    int width,
-    int height,
-    float centerX,
-    float centerY,
-    float radius,
-    float thickness,
-    std::uint8_t blue,
-    std::uint8_t green,
-    std::uint8_t red,
-    std::uint8_t opacity) {
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const float dx = static_cast<float>(x) - centerX;
-            const float dy = static_cast<float>(y) - centerY;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            const float coverage = std::clamp(
-                thickness + 0.5F - std::abs(distance - radius),
-                0.0F,
-                1.0F);
-            const auto alpha = static_cast<std::uint8_t>(opacity * coverage);
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width + x) * 4;
-            blendPixel(pixels + offset, blue, green, red, alpha);
+    void blend(int x, int y, Color color, float alpha) {
+        std::uint8_t* pixel = m_pixels.data() + (static_cast<std::size_t>(y) * m_size + x) * 4;
+        const float destinationAlpha = pixel[3] / 255.0F;
+        const float outputAlpha = alpha + destinationAlpha * (1.0F - alpha);
+        const auto channel = [&](std::uint8_t source, std::uint8_t current) {
+            const float value = (source * alpha + current * destinationAlpha * (1.0F - alpha)) /
+                outputAlpha;
+            return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 255.0F)));
+        };
+        pixel[0] = channel(color.blue, pixel[0]);
+        pixel[1] = channel(color.green, pixel[1]);
+        pixel[2] = channel(color.red, pixel[2]);
+        pixel[3] = static_cast<std::uint8_t>(std::lround(outputAlpha * 255.0F));
+    }
+
+    int m_size;
+    std::vector<std::uint8_t> m_pixels;
+};
+
+HICON iconFromCanvas(const Canvas& canvas) {
+    const int size = canvas.size();
+
+    BITMAPINFO colorDescription{};
+    colorDescription.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    colorDescription.bmiHeader.biWidth = size;
+    colorDescription.bmiHeader.biHeight = -size;
+    colorDescription.bmiHeader.biPlanes = 1;
+    colorDescription.bmiHeader.biBitCount = 32;
+    colorDescription.bmiHeader.biCompression = BI_RGB;
+
+    void* colorPixels = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(
+        nullptr, &colorDescription, DIB_RGB_COLORS, &colorPixels, nullptr, 0);
+    if (colorBitmap == nullptr || colorPixels == nullptr) {
+        if (colorBitmap != nullptr) {
+            DeleteObject(colorBitmap);
+        }
+        return nullptr;
+    }
+    std::memcpy(colorPixels, canvas.pixels().data(), canvas.pixels().size());
+
+    // The alpha channel drives rendering; the mask only marks fully clear pixels.
+    const std::size_t maskStride = ((static_cast<std::size_t>(size) + 15u) / 16u) * 2u;
+    std::vector<std::uint8_t> maskBits(maskStride * size, 0);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            if (canvas.pixels()[(static_cast<std::size_t>(y) * size + x) * 4 + 3] == 0) {
+                maskBits[static_cast<std::size_t>(y) * maskStride + x / 8] |=
+                    static_cast<std::uint8_t>(0x80u >> (x % 8));
+            }
         }
     }
+    HBITMAP maskBitmap = CreateBitmap(size, size, 1, 1, maskBits.data());
+    if (maskBitmap == nullptr) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = colorBitmap;
+    info.hbmMask = maskBitmap;
+    const HICON icon = CreateIconIndirect(&info);
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    return icon;
+}
+
+constexpr Color kOutline{14, 15, 19};
+constexpr Color kRingLight{246, 247, 250};
+constexpr Color kRecordDim{196, 32, 44};
+constexpr Color kRecordBright{255, 59, 70};
+constexpr Color kPausedRing{150, 156, 168};
+constexpr Color kPausedFill{38, 41, 49};
+
+std::uint8_t mix(std::uint8_t from, std::uint8_t to, float amount) {
+    return static_cast<std::uint8_t>(std::lround(from + (to - from) * amount));
 }
 
 } // namespace
@@ -117,163 +150,51 @@ TrayIcon::~TrayIcon() {
     destroy();
 }
 
-HICON TrayIcon::createPulseFrame(HICON baseIcon, float intensity) {
-    if (baseIcon == nullptr) {
-        return nullptr;
-    }
+int TrayIcon::traySize() {
+    const int size = GetSystemMetrics(SM_CXSMICON);
+    return std::clamp(size > 0 ? size : 16, 16, 64);
+}
 
-    ICONINFO sourceInfo{};
-    if (!GetIconInfo(baseIcon, &sourceInfo) || sourceInfo.hbmColor == nullptr) {
-        if (sourceInfo.hbmColor != nullptr) {
-            DeleteObject(sourceInfo.hbmColor);
-        }
-        if (sourceInfo.hbmMask != nullptr) {
-            DeleteObject(sourceInfo.hbmMask);
-        }
+HICON TrayIcon::createRecordingFrame(int size, float intensity) {
+    if (size < 8) {
         return nullptr;
     }
-    const IconBitmapGuard sourceBitmaps{sourceInfo};
-
-    BITMAP sourceBitmap{};
-    if (GetObjectW(sourceInfo.hbmColor, sizeof(sourceBitmap), &sourceBitmap) == 0) {
-        return nullptr;
-    }
-    if (sourceBitmap.bmWidth <= 0 || sourceBitmap.bmHeight == 0) {
-        return nullptr;
-    }
-
-    // Keep the logo fixed; only the recording indicator's glow changes per frame.
-    constexpr int width = 32;
-    constexpr int height = 32;
     intensity = std::clamp(intensity, 0.0F, 1.0F);
+    const float unit = size / 16.0F;
 
-    BITMAPINFO colorDescription{};
-    colorDescription.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    colorDescription.bmiHeader.biWidth = width;
-    colorDescription.bmiHeader.biHeight = -height;
-    colorDescription.bmiHeader.biPlanes = 1;
-    colorDescription.bmiHeader.biBitCount = 32;
-    colorDescription.bmiHeader.biCompression = BI_RGB;
+    // Inverted logo: light ring around a solid red "record" dot that breathes.
+    // The dark rim keeps the shape readable on light taskbars too.
+    Canvas canvas(size);
+    canvas.disc(8.0F * unit - 0.25F, kOutline, 0.9F);
+    canvas.disc(6.9F * unit, kRingLight);
+    canvas.disc(5.0F * unit, kOutline, 0.55F);
+    const Color core{
+        mix(kRecordDim.red, kRecordBright.red, intensity),
+        mix(kRecordDim.green, kRecordBright.green, intensity),
+        mix(kRecordDim.blue, kRecordBright.blue, intensity),
+    };
+    canvas.disc((3.6F + 0.9F * intensity) * unit, core);
+    return iconFromCanvas(canvas);
+}
 
-    HDC screen = GetDC(nullptr);
-    if (screen == nullptr) {
+HICON TrayIcon::createPausedIcon(int size) {
+    if (size < 8) {
         return nullptr;
     }
-    void* colorPixels = nullptr;
-    HBITMAP colorBitmap = CreateDIBSection(
-        screen,
-        &colorDescription,
-        DIB_RGB_COLORS,
-        &colorPixels,
-        nullptr,
-        0);
-    if (colorBitmap == nullptr || colorPixels == nullptr) {
-        if (colorBitmap != nullptr) {
-            DeleteObject(colorBitmap);
-        }
-        ReleaseDC(nullptr, screen);
-        return nullptr;
-    }
-    std::memset(colorPixels, 0, static_cast<std::size_t>(width) * height * 4);
+    const float unit = size / 16.0F;
+    const float center = size / 2.0F;
 
-    HDC memoryDc = CreateCompatibleDC(screen);
-    if (memoryDc == nullptr) {
-        DeleteObject(colorBitmap);
-        ReleaseDC(nullptr, screen);
-        return nullptr;
-    }
-    const HGDIOBJ previousBitmap = SelectObject(memoryDc, colorBitmap);
-    const bool bitmapSelected = previousBitmap != nullptr && previousBitmap != HGDI_ERROR;
-    const bool iconDrawn = bitmapSelected && DrawIconEx(
-            memoryDc, 0, 0, baseIcon, width, height, 0, nullptr, DI_NORMAL) != FALSE;
-    if (previousBitmap != nullptr && previousBitmap != HGDI_ERROR) {
-        SelectObject(memoryDc, previousBitmap);
-    }
-    DeleteDC(memoryDc);
-    ReleaseDC(nullptr, screen);
-    if (!iconDrawn) {
-        DeleteObject(colorBitmap);
-        return nullptr;
-    }
-
-    auto* pixels = static_cast<std::uint8_t*>(colorPixels);
-    constexpr float indicatorX = 24.0F;
-    constexpr float indicatorY = 7.0F;
-    const auto glowOpacity = static_cast<std::uint8_t>(190.0F * intensity);
-    paintRing(
-        pixels,
-        width,
-        height,
-        indicatorX,
-        indicatorY,
-        4.1F,
-        1.25F,
-        62,
-        54,
-        255,
-        glowOpacity);
-    paintDisc(pixels, width, height, indicatorX, indicatorY, 3.35F, 18, 19, 25, 255);
-    paintDisc(pixels, width, height, indicatorX, indicatorY, 2.75F, 240, 241, 246, 255);
-    const auto coreBlue = static_cast<std::uint8_t>(48.0F + 28.0F * intensity);
-    const auto coreGreen = static_cast<std::uint8_t>(38.0F + 30.0F * intensity);
-    paintDisc(pixels, width, height, indicatorX, indicatorY, 2.1F, coreBlue, coreGreen, 255, 255);
-
-    struct MonochromeBitmapInfo {
-        BITMAPINFOHEADER header;
-        RGBQUAD colors[2];
-    } maskDescription{};
-    maskDescription.header.biSize = sizeof(BITMAPINFOHEADER);
-    maskDescription.header.biWidth = width;
-    maskDescription.header.biHeight = -height;
-    maskDescription.header.biPlanes = 1;
-    maskDescription.header.biBitCount = 1;
-    maskDescription.header.biCompression = BI_RGB;
-    maskDescription.colors[0] = RGBQUAD{0, 0, 0, 0};
-    maskDescription.colors[1] = RGBQUAD{255, 255, 255, 0};
-    void* maskPixels = nullptr;
-    screen = GetDC(nullptr);
-    if (screen == nullptr) {
-        DeleteObject(colorBitmap);
-        return nullptr;
-    }
-    HBITMAP maskBitmap = CreateDIBSection(
-        screen,
-        reinterpret_cast<BITMAPINFO*>(&maskDescription),
-        DIB_RGB_COLORS,
-        &maskPixels,
-        nullptr,
-        0);
-    ReleaseDC(nullptr, screen);
-    if (maskBitmap == nullptr || maskPixels == nullptr) {
-        if (maskBitmap != nullptr) {
-            DeleteObject(maskBitmap);
-        }
-        DeleteObject(colorBitmap);
-        return nullptr;
-    }
-
-    const std::size_t maskStride = ((static_cast<std::size_t>(width) + 31u) / 32u) * 4u;
-    auto* maskBytes = static_cast<std::uint8_t*>(maskPixels);
-    std::memset(maskBytes, 0, maskStride * height);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const std::size_t colorOffset = (static_cast<std::size_t>(y) * width + x) * 4;
-            if (pixels[colorOffset + 3] == 0) {
-                const std::size_t maskOffset = static_cast<std::size_t>(y) * maskStride +
-                    static_cast<std::size_t>(x) / 8u;
-                maskBytes[maskOffset] |= static_cast<std::uint8_t>(0x80u >> (x % 8));
-            }
-        }
-    }
-
-    ICONINFO frameInfo{};
-    frameInfo.fIcon = TRUE;
-    frameInfo.hbmColor = colorBitmap;
-    frameInfo.hbmMask = maskBitmap;
-    const HICON frame = CreateIconIndirect(&frameInfo);
-    DeleteObject(maskBitmap);
-    DeleteObject(colorBitmap);
-    return frame;
+    Canvas canvas(size);
+    canvas.disc(8.0F * unit - 0.25F, kOutline, 0.9F);
+    canvas.disc(6.9F * unit, kPausedRing);
+    canvas.disc(5.6F * unit, kPausedFill);
+    const float barWidth = 1.7F * unit;
+    const float gap = 1.0F * unit;
+    const float top = center - 3.0F * unit;
+    const float bottom = center + 3.0F * unit;
+    canvas.rect(center - gap - barWidth, top, center - gap, bottom, kRingLight);
+    canvas.rect(center + gap, top, center + gap + barWidth, bottom, kRingLight);
+    return iconFromCanvas(canvas);
 }
 
 bool TrayIcon::create(

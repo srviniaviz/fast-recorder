@@ -4,7 +4,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 
 namespace fastrecord::recording {
 
@@ -36,6 +39,25 @@ struct CaptureTarget {
     HWND window{nullptr};
 };
 
+// Lets the UI thread ask a running window capture to follow another window.
+// The capture worker polls take() between frames.
+class CaptureRetarget final {
+public:
+    void request(HWND window) {
+        std::scoped_lock lock(m_mutex);
+        m_pending = window;
+    }
+
+    HWND take() {
+        std::scoped_lock lock(m_mutex);
+        return std::exchange(m_pending, nullptr);
+    }
+
+private:
+    std::mutex m_mutex;
+    HWND m_pending{nullptr};
+};
+
 struct RecordingSettings {
     CaptureTarget target{};
     std::filesystem::path outputDirectory{};
@@ -50,6 +72,8 @@ struct RecordingSettings {
     bool captureCursor{true};
     bool captureSystemAudio{true};
     bool captureMicrophone{false};
+    // Optional; only honoured when target.kind is SelectedWindow.
+    std::shared_ptr<CaptureRetarget> retarget;
 };
 
 class IRecordingBackend {

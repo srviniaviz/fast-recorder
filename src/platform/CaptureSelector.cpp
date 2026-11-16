@@ -1,33 +1,31 @@
 #include "platform/CaptureSelector.h"
 
+#include <dwmapi.h>
+#include <shellapi.h>
+#include <wincodec.h>
 #include <windowsx.h>
+#include <wincrypt.h>
+#include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <cwctype>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
+
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 namespace fastrecord::platform {
 
 namespace {
 
-constexpr wchar_t kWindowPickerClass[] = L"FastRecord.CaptureWindowPicker";
 constexpr wchar_t kRegionPickerClass[] = L"FastRecord.CaptureRegionPicker";
-constexpr int kWindowPickerOk = 1001;
-constexpr int kWindowPickerCancel = 1002;
-
-struct WindowEntry {
-    HWND handle{};
-    std::wstring title;
-};
-
-struct WindowPickerState {
-    HWND owner{};
-    HWND list{};
-    HWND selected{};
-    bool accepted{false};
-    std::vector<WindowEntry> entries;
-};
+using Microsoft::WRL::ComPtr;
+constexpr UINT kIconPixels = 32;
 
 struct RegionPickerState {
     HWND owner{};
@@ -40,40 +38,182 @@ struct RegionPickerState {
     bool accepted{false};
 };
 
-void setDefaultFont(HWND control) {
-    SendMessageW(
-        control,
-        WM_SETFONT,
-        reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
-        TRUE);
+std::wstring fileDescription(const std::wstring& path) {
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    if (size == 0) {
+        return {};
+    }
+    std::vector<std::uint8_t> data(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) {
+        return {};
+    }
+
+    struct Translation {
+        WORD language;
+        WORD codePage;
+    };
+    Translation* translations = nullptr;
+    UINT translationBytes = 0;
+    if (!VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+            reinterpret_cast<void**>(&translations), &translationBytes) ||
+        translationBytes < sizeof(Translation)) {
+        return {};
+    }
+
+    wchar_t query[64]{};
+    swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\FileDescription",
+        translations[0].language, translations[0].codePage);
+    wchar_t* description = nullptr;
+    UINT length = 0;
+    if (!VerQueryValueW(data.data(), query, reinterpret_cast<void**>(&description), &length) ||
+        description == nullptr || length <= 1) {
+        return {};
+    }
+    std::wstring text(description);
+    while (!text.empty() && std::iswspace(text.back())) {
+        text.pop_back();
+    }
+    return text;
 }
 
-bool isWindowCandidate(HWND window, HWND excludedWindow) {
-    if (window == nullptr || window == excludedWindow || !IsWindow(window) ||
-        !IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) {
-        return false;
+std::wstring processImagePath(HWND window) {
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (processId == 0) {
+        return {};
     }
-
-    const LONG_PTR extendedStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
-    if ((extendedStyle & WS_EX_TOOLWINDOW) != 0) {
-        return false;
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (process == nullptr) {
+        return {};
     }
-
-    const int titleLength = GetWindowTextLengthW(window);
-    return titleLength > 0;
+    std::wstring path(MAX_PATH * 2, L'\0');
+    DWORD length = static_cast<DWORD>(path.size());
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, path.data(), &length);
+    CloseHandle(process);
+    if (!ok) {
+        return {};
+    }
+    path.resize(length);
+    return path;
 }
 
-BOOL CALLBACK enumerateWindows(HWND window, LPARAM parameter) {
-    auto& state = *reinterpret_cast<std::pair<std::vector<WindowEntry>*, HWND>*>(parameter);
-    if (!isWindowCandidate(window, state.second)) {
-        return TRUE;
+std::wstring friendlyAppName(const std::wstring& imagePath, const std::wstring& title) {
+    if (imagePath.empty()) {
+        return {};
+    }
+    const std::filesystem::path path(imagePath);
+    // UWP apps are hosted by ApplicationFrameHost, whose description says nothing useful.
+    if (_wcsicmp(path.filename().c_str(), L"ApplicationFrameHost.exe") == 0) {
+        return title;
+    }
+    std::wstring description = fileDescription(imagePath);
+    return description.empty() ? path.stem().wstring() : description;
+}
+
+HICON windowIcon(HWND window, const std::wstring& imagePath, bool& owned) {
+    owned = false;
+    const auto ask = [window](WPARAM kind) -> HICON {
+        DWORD_PTR result = 0;
+        if (SendMessageTimeoutW(window, WM_GETICON, kind, 0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 60, &result) == 0) {
+            return nullptr;
+        }
+        return reinterpret_cast<HICON>(result);
+    };
+    HICON icon = ask(ICON_BIG);
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
+    }
+    if (icon == nullptr) {
+        icon = ask(ICON_SMALL2);
+    }
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+    }
+    if (icon == nullptr && !imagePath.empty() &&
+        ExtractIconExW(imagePath.c_str(), 0, &icon, nullptr, 1) > 0 && icon != nullptr) {
+        owned = true;
+    }
+    return icon;
+}
+
+std::wstring iconAsPngDataUrl(IWICImagingFactory* factory, HICON icon) {
+    if (factory == nullptr || icon == nullptr) {
+        return {};
     }
 
-    const int titleLength = GetWindowTextLengthW(window);
-    std::wstring title(static_cast<size_t>(titleLength) + 1, L'\0');
-    GetWindowTextW(window, title.data(), titleLength + 1);
-    title.resize(static_cast<size_t>(titleLength));
-    state.first->push_back({window, std::move(title)});
+    ComPtr<IWICBitmap> bitmap;
+    if (FAILED(factory->CreateBitmapFromHICON(icon, &bitmap))) {
+        return {};
+    }
+    UINT width = 0;
+    UINT height = 0;
+    bitmap->GetSize(&width, &height);
+    ComPtr<IWICBitmapSource> source = bitmap;
+    if (width != kIconPixels || height != kIconPixels) {
+        ComPtr<IWICBitmapScaler> scaler;
+        if (FAILED(factory->CreateBitmapScaler(&scaler)) ||
+            FAILED(scaler->Initialize(bitmap.Get(), kIconPixels, kIconPixels,
+                WICBitmapInterpolationModeHighQualityCubic))) {
+            return {};
+        }
+        source = scaler;
+    }
+
+    ComPtr<IStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) ||
+        FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) ||
+        FAILED(encoder->CreateNewFrame(&frame, nullptr)) ||
+        FAILED(frame->Initialize(nullptr)) ||
+        FAILED(frame->SetSize(kIconPixels, kIconPixels)) ||
+        FAILED(frame->SetPixelFormat(&format)) ||
+        FAILED(frame->WriteSource(source.Get(), nullptr)) ||
+        FAILED(frame->Commit()) ||
+        FAILED(encoder->Commit())) {
+        return {};
+    }
+
+    HGLOBAL memory = nullptr;
+    STATSTG stat{};
+    if (FAILED(GetHGlobalFromStream(stream.Get(), &memory)) ||
+        FAILED(stream->Stat(&stat, STATFLAG_NONAME)) || stat.cbSize.QuadPart == 0) {
+        return {};
+    }
+    const auto byteCount = static_cast<DWORD>(stat.cbSize.QuadPart);
+    const auto* bytes = static_cast<const BYTE*>(GlobalLock(memory));
+    if (bytes == nullptr) {
+        return {};
+    }
+    const DWORD flags = CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF;
+    DWORD textLength = 0;
+    std::wstring base64;
+    if (CryptBinaryToStringW(bytes, byteCount, flags, nullptr, &textLength) && textLength > 0) {
+        base64.resize(textLength);
+        if (CryptBinaryToStringW(bytes, byteCount, flags, base64.data(), &textLength)) {
+            base64.resize(textLength);
+        } else {
+            base64.clear();
+        }
+    }
+    GlobalUnlock(memory);
+    return base64.empty() ? std::wstring{} : L"data:image/png;base64," + base64;
+}
+
+struct Enumeration {
+    HWND excluded{};
+    std::vector<HWND> windows;
+};
+
+BOOL CALLBACK collectWindow(HWND window, LPARAM parameter) {
+    auto& enumeration = *reinterpret_cast<Enumeration*>(parameter);
+    if (isCaptureWindowCandidate(window, enumeration.excluded)) {
+        enumeration.windows.push_back(window);
+    }
     return TRUE;
 }
 
@@ -84,100 +224,6 @@ RECT normalizedRect(POINT first, POINT second) {
         std::max(first.x, second.x),
         std::max(first.y, second.y),
     };
-}
-
-void closeWindowPicker(HWND dialog, WindowPickerState& state) {
-    const LRESULT selection = SendMessageW(state.list, LB_GETCURSEL, 0, 0);
-    if (selection == LB_ERR) {
-        MessageBoxW(dialog, L"Selecione uma janela para continuar.", L"Fast Record", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    const LRESULT handle = SendMessageW(state.list, LB_GETITEMDATA, selection, 0);
-    if (handle == LB_ERR || handle == 0) {
-        return;
-    }
-
-    state.selected = reinterpret_cast<HWND>(handle);
-    state.accepted = IsWindow(state.selected) && IsWindowVisible(state.selected);
-    DestroyWindow(dialog);
-}
-
-LRESULT CALLBACK windowPickerProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    auto* state = reinterpret_cast<WindowPickerState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-        state = static_cast<WindowPickerState*>(create->lpCreateParams);
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-    }
-
-    switch (message) {
-    case WM_CREATE: {
-        RECT client{};
-        GetClientRect(window, &client);
-        const int width = client.right - client.left;
-        const int height = client.bottom - client.top;
-
-        HWND title = CreateWindowExW(
-            0, L"STATIC", L"Escolha a janela que deseja gravar:",
-            WS_CHILD | WS_VISIBLE, 16, 14, width - 32, 24,
-            window, nullptr, GetModuleHandleW(nullptr), nullptr);
-        state->list = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
-                LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-            16, 46, width - 32, height - 102,
-            window, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND ok = CreateWindowExW(
-            0, L"BUTTON", L"Gravar janela",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            width - 218, height - 44, 112, 28,
-            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kWindowPickerOk)), GetModuleHandleW(nullptr), nullptr);
-        HWND cancel = CreateWindowExW(
-            0, L"BUTTON", L"Cancelar",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            width - 98, height - 44, 82, 28,
-            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kWindowPickerCancel)), GetModuleHandleW(nullptr), nullptr);
-        setDefaultFont(title);
-        setDefaultFont(state->list);
-        setDefaultFont(ok);
-        setDefaultFont(cancel);
-
-        for (const auto& entry : state->entries) {
-            const LRESULT index = SendMessageW(state->list, LB_ADDSTRING, 0,
-                reinterpret_cast<LPARAM>(entry.title.c_str()));
-            SendMessageW(state->list, LB_SETITEMDATA, index,
-                reinterpret_cast<LPARAM>(entry.handle));
-        }
-        if (!state->entries.empty()) {
-            SendMessageW(state->list, LB_SETCURSEL, 0, 0);
-        }
-        return 0;
-    }
-    case WM_COMMAND:
-        if (state == nullptr) {
-            return 0;
-        }
-        if (LOWORD(wParam) == kWindowPickerOk ||
-            (LOWORD(wParam) == 0 && HIWORD(wParam) == LBN_DBLCLK)) {
-            closeWindowPicker(window, *state);
-        } else if (LOWORD(wParam) == kWindowPickerCancel) {
-            DestroyWindow(window);
-        }
-        return 0;
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
-        } else if (wParam == VK_RETURN && state != nullptr) {
-            closeWindowPicker(window, *state);
-        }
-        return 0;
-    case WM_CLOSE:
-        DestroyWindow(window);
-        return 0;
-    default:
-        return DefWindowProcW(window, message, wParam, lParam);
-    }
 }
 
 LRESULT CALLBACK regionPickerProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -294,88 +340,64 @@ bool registerPickerClass(const wchar_t* name, WNDPROC procedure, HBRUSH backgrou
     return GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
-RECT pickerBounds(HWND owner, int width, int height) {
-    RECT reference{};
-    HMONITOR monitor = nullptr;
-    if (owner != nullptr && GetWindowRect(owner, &reference)) {
-        monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
-    } else {
-        POINT cursor{};
-        GetCursorPos(&cursor);
-        monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
-    }
-
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (monitor == nullptr || !GetMonitorInfoW(monitor, &info)) {
-        info.rcWork = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
-    }
-
-    const int x = info.rcWork.left +
-        ((info.rcWork.right - info.rcWork.left) - width) / 2;
-    const int y = info.rcWork.top +
-        ((info.rcWork.bottom - info.rcWork.top) - height) / 2;
-    return RECT{x, y, x + width, y + height};
-}
-
 } // namespace
 
-HWND chooseCaptureWindow(HWND owner, HWND excludedWindow) {
-    WindowPickerState state;
-    state.owner = owner;
-    std::pair<std::vector<WindowEntry>*, HWND> enumeration{&state.entries, excludedWindow};
-    EnumWindows(enumerateWindows, reinterpret_cast<LPARAM>(&enumeration));
-    if (state.entries.empty()) {
-        MessageBoxW(owner, L"Nenhuma janela visível disponível para captura.",
-            L"Fast Record", MB_OK | MB_ICONINFORMATION);
-        return nullptr;
+bool isCaptureWindowCandidate(HWND window, HWND excludedWindow) {
+    if (window == nullptr || window == excludedWindow || !IsWindow(window) ||
+        !IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) {
+        return false;
     }
 
-    if (!registerPickerClass(kWindowPickerClass, windowPickerProcedure,
-            reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1))) {
-        return nullptr;
+    const LONG_PTR extendedStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    if ((extendedStyle & WS_EX_TOOLWINDOW) != 0) {
+        return false;
     }
 
-    const RECT bounds = pickerBounds(owner, 540, 390);
-    if (owner != nullptr) {
-        EnableWindow(owner, FALSE);
+    // Suspended UWP apps and windows on other virtual desktops are "visible" but cloaked.
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+        cloaked != 0) {
+        return false;
     }
-    const HWND dialog = CreateWindowExW(
-        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
-        kWindowPickerClass,
-        L"Selecionar janela · Fast Record",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
-        owner, nullptr, GetModuleHandleW(nullptr), &state);
-    if (dialog == nullptr) {
-        if (owner != nullptr) {
-            EnableWindow(owner, TRUE);
+
+    return GetWindowTextLengthW(window) > 0;
+}
+
+std::vector<CaptureWindowInfo> listCaptureWindows(HWND excludedWindow) {
+    Enumeration enumeration{excludedWindow, {}};
+    EnumWindows(collectWindow, reinterpret_cast<LPARAM>(&enumeration));
+
+    ComPtr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory)))) {
+        factory.Reset();
+    }
+
+    std::vector<CaptureWindowInfo> windows;
+    windows.reserve(enumeration.windows.size());
+    for (const HWND window : enumeration.windows) {
+        CaptureWindowInfo info;
+        info.handle = window;
+        const int titleLength = GetWindowTextLengthW(window);
+        info.title.resize(static_cast<std::size_t>(titleLength) + 1);
+        info.title.resize(static_cast<std::size_t>(
+            GetWindowTextW(window, info.title.data(), titleLength + 1)));
+        if (info.title.empty()) {
+            continue;
         }
-        return nullptr;
-    }
+        info.minimized = IsIconic(window) != FALSE;
 
-    ShowWindow(dialog, SW_SHOWNORMAL);
-    UpdateWindow(dialog);
-    SetForegroundWindow(dialog);
-    SetFocus(state.list);
-
-    MSG message{};
-    while (IsWindow(dialog)) {
-        const BOOL result = GetMessageW(&message, nullptr, 0, 0);
-        if (result <= 0) {
-            break;
+        const std::wstring imagePath = processImagePath(window);
+        info.appName = friendlyAppName(imagePath, info.title);
+        bool ownedIcon = false;
+        const HICON icon = windowIcon(window, imagePath, ownedIcon);
+        info.iconDataUrl = iconAsPngDataUrl(factory.Get(), icon);
+        if (ownedIcon) {
+            DestroyIcon(icon);
         }
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+        windows.push_back(std::move(info));
     }
-
-    if (owner != nullptr) {
-        EnableWindow(owner, TRUE);
-        if (IsWindowVisible(owner)) {
-            SetForegroundWindow(owner);
-        }
-    }
-    return state.accepted ? state.selected : nullptr;
+    return windows;
 }
 
 bool chooseCaptureRegion(HWND owner, HMONITOR monitor, RECT& region) {
