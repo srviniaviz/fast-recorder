@@ -48,6 +48,7 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings, CaptureOutpu
     if (m_size.Width <= 0 || m_size.Height <= 0) {
         throw hresult_error(E_INVALIDARG, L"O monitor não possui uma área válida de captura.");
     }
+    m_poolSize = m_size;
 
     m_videoDevice = m_device.as<ID3D11VideoDevice>();
     m_videoContext = m_context.as<ID3D11VideoContext>();
@@ -125,17 +126,20 @@ GraphicsCapture::GraphicsCapture(const RecordingSettings& settings, CaptureOutpu
     configureStream();
 
     m_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-        m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+        m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_poolSize);
     startSession();
 }
 
 void GraphicsCapture::configureStream() {
     const RECT source = m_hasRegion ? m_region : RECT{0, 0, m_size.Width, m_size.Height};
-    // Fit the entire capture item, preserving aspect ratio; uncovered pixels are black.
-    const double scale = std::min(static_cast<double>(m_width) / m_size.Width,
-        static_cast<double>(m_height) / m_size.Height);
-    const LONG fitWidth = std::max<LONG>(1, static_cast<LONG>(m_size.Width * scale));
-    const LONG fitHeight = std::max<LONG>(1, static_cast<LONG>(m_size.Height * scale));
+    // Fit the source (whole item or region), preserving its aspect ratio;
+    // uncovered pixels are black.
+    const LONG sourceWidth = source.right - source.left;
+    const LONG sourceHeight = source.bottom - source.top;
+    const double scale = std::min(static_cast<double>(m_width) / sourceWidth,
+        static_cast<double>(m_height) / sourceHeight);
+    const LONG fitWidth = std::max<LONG>(1, static_cast<LONG>(sourceWidth * scale));
+    const LONG fitHeight = std::max<LONG>(1, static_cast<LONG>(sourceHeight * scale));
     const LONG left = (static_cast<LONG>(m_width) - fitWidth) / 2;
     const LONG top = (static_cast<LONG>(m_height) - fitHeight) / 2;
     const RECT destination{left, top, left + fitWidth, top + fitHeight};
@@ -176,7 +180,8 @@ void GraphicsCapture::switchToWindow(HWND window) {
     m_session.Close();
     m_item = item;
     m_size = size;
-    m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
+    m_poolSize = size;
+    m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_poolSize);
     configureStream();
     startSession();
 }
@@ -208,24 +213,37 @@ bool GraphicsCapture::update() {
         frame = std::move(newer);
     }
     const auto size = frame.ContentSize();
-    if (size.Width != m_size.Width || size.Height != m_size.Height) {
-        if (!m_windowSource) {
-            throw hresult_error(E_ABORT, L"A resolução do monitor mudou. Inicie uma nova gravação.");
-        }
-        // A recorded window was resized: follow it. The video keeps its size and
-        // the window is refitted inside it; the next frame arrives at the new size.
-        frame.Close();
-        if (size.Width <= 0 || size.Height <= 0) {
-            return false;
-        }
-        m_size = size;
-        m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_size);
-        configureStream();
-        return false;
+    if (!m_windowSource && (size.Width != m_size.Width || size.Height != m_size.Height)) {
+        throw hresult_error(E_ABORT, L"A resolução do monitor mudou. Inicie uma nova gravação.");
     }
     const auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     com_ptr<ID3D11Texture2D> texture;
     check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
+    if (m_windowSource) {
+        // A recorded window can be resized, maximized or restored at any
+        // time: follow it and refit it inside the fixed video size instead of
+        // stopping. The pool only grows: frames already queued after a resize
+        // keep the previous size, and shrinking would make them trigger
+        // another resize.
+        if (size.Width <= 0 || size.Height <= 0) {
+            frame.Close();
+            return false;
+        }
+        if (size.Width > m_poolSize.Width || size.Height > m_poolSize.Height) {
+            m_poolSize.Width = std::max(m_poolSize.Width, size.Width);
+            m_poolSize.Height = std::max(m_poolSize.Height, size.Height);
+            m_pool.Recreate(m_runtimeDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, m_poolSize);
+        }
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        texture->GetDesc(&textureDesc);
+        const winrt::Windows::Graphics::SizeInt32 visible{
+            std::min<int32_t>(size.Width, static_cast<int32_t>(textureDesc.Width)),
+            std::min<int32_t>(size.Height, static_cast<int32_t>(textureDesc.Height))};
+        if (visible.Width != m_size.Width || visible.Height != m_size.Height) {
+            m_size = visible;
+            configureStream();
+        }
+    }
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
     inputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
     com_ptr<ID3D11VideoProcessorInputView> input;

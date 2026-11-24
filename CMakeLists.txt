@@ -220,6 +220,30 @@ if(MSVC)
 endif()
 target_link_libraries(nvenc-smoke PRIVATE d3d11 windowsapp mf mfplat mfreadwrite mfuuid ole32 user32 wmcodecdspuuid)
 
+# Records a test window while it is resized, maximized and restored.
+add_executable(window-resize-smoke EXCLUDE_FROM_ALL
+    tests/WindowResizeSmoke.cpp
+    src/recording/AudioCapture.cpp
+    src/recording/GraphicsCapture.cpp
+    src/recording/MediaFoundationBackend.cpp
+    src/recording/Mp4Muxer.cpp
+    src/recording/NvencBackend.cpp
+    src/recording/QsvProbe.cpp
+)
+target_include_directories(window-resize-smoke PRIVATE src)
+if(FASTRECORD_NVENC_INCLUDE_DIR)
+    target_include_directories(window-resize-smoke PRIVATE ${FASTRECORD_NVENC_INCLUDE_DIR})
+endif()
+target_compile_definitions(window-resize-smoke PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
+    FASTRECORD_HAS_NVENC=${FASTRECORD_HAS_NVENC}
+)
+if(MSVC)
+    target_compile_options(window-resize-smoke PRIVATE /W4 /permissive- /utf-8)
+endif()
+target_link_libraries(window-resize-smoke PRIVATE
+    d3d11 dxgi windowsapp mf mfplat mfreadwrite mfuuid ole32 user32 gdi32 wmcodecdspuuid)
+
 # AMF is also optional. The headers are used at build time; the AMD runtime is
 # loaded from the installed display driver at runtime.
 set(FASTRECORD_AMF_SDK_DIR "" CACHE PATH "AMD Advanced Media Framework SDK directory")

@@ -52,7 +52,9 @@ private:
     winrt::com_ptr<ID3D11Texture2D> m_output;
     winrt::com_ptr<ID3D11Texture2D> m_staging;
     winrt::com_ptr<ID3D11VideoProcessorOutputView> m_outputView;
+    // Size of the area being scaled into the video (monitor or window content).
     winrt::Windows::Graphics::SizeInt32 m_size{};
+    winrt::Windows::Graphics::SizeInt32 m_poolSize{};
     UINT m_width{}, m_height{};
     HMONITOR m_monitor{};
     bool m_monitorSource{true};
